@@ -1,0 +1,41 @@
+# Cadastro das instituições da prova de conceito. Todas fictícias (domínio .test).
+# No app, isto vira campos da instituição no banco, mantidos pela equipe IoTEdu e pelo gestor de rede.
+#
+#   dominios       domínios de e-mail que a instituição aceita como dela
+#   metodos        logins ligados para a instituição: google, microsoft, ldap, cafe
+#   google_hd      domínios do Google Workspace (claim `hd` do ID token do Google)
+#   microsoft_tid  diretórios do Entra ID (claim `tid` do ID token da Microsoft)
+#   cafe_escopos   escopos do eduPersonPrincipalName (o que vem depois do @)
+#   ldap           diretório da instituição; a senha da conta de serviço vem de variável de ambiente
+#
+# Um item escrito como "${NOME}" vem da variável NOME do .env. É assim que entram os identificadores
+# reais de quem testa (GOOGLE_HD e MS_TENANT_ID), sem irem para o git. Variável vazia: o item some.
+instituicoes:
+  unia:
+    nome: Universidade A
+    dominios: [unia.test, "${GOOGLE_HD}"]
+    metodos: [google, microsoft, cafe]
+    google_hd: [unia.test, "${GOOGLE_HD}"]
+    # O primeiro vem do .env; o segundo é fictício, usado pelos testes automáticos.
+    microsoft_tid: ["${MS_TENANT_ID}", "11111111-1111-4111-8111-111111111111"]
+    cafe_escopos: [unia.test]
+
+  unib:
+    nome: Universidade B
+    dominios: [unib.test]
+    metodos: [ldap]
+    ldap:
+      url: ldaps://ldap:636
+      base: ou=pessoas,dc=unib,dc=test
+      filtro: "(&(objectClass=inetOrgPerson)(uid={usuario}))"
+      bind_dn: cn=leitor,ou=servicos,dc=unib,dc=test
+      senha_env: LDAP_UNIB_SENHA
+      ca: /certs-pub/ca.crt
+
+  # Tem domínio no Google, mas o login com Google está desligado: só entra pela CAFe.
+  unic:
+    nome: Universidade C
+    dominios: [unic.test]
+    metodos: [cafe]
+    google_hd: [unic.test]
+    cafe_escopos: [unic.test]
