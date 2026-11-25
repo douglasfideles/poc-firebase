@@ -1,0 +1,13 @@
+# Segredos: nunca entram no git.
+.env
+credenciais/
+segredos/
+*conta*.json
+*service*account*.json
+
+# Dados locais e lixo de execução
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+__pycache__/
+.pytest_cache/
