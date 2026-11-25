@@ -1,0 +1,108 @@
+# Prova de conceito: login do IoTEdu pelo Firebase Authentication, contra um projeto Firebase de verdade.
+# Antes: ./preparar.sh, preencher o bloco do Firebase no .env e salvar a chave em credenciais/conta.json.
+name: iotedu-firebase-poc
+
+x-firebase: &firebase
+  FIREBASE_PROJECT_ID: ${FIREBASE_PROJECT_ID:-}
+  FIREBASE_WEB_API_KEY: ${FIREBASE_WEB_API_KEY:-}
+  FIREBASE_AUTH_DOMAIN: ${FIREBASE_AUTH_DOMAIN:-}
+
+services:
+  # OpenLDAP de teste, com TLS e três pessoas fictícias. Faz o papel do diretório de uma instituição.
+  ldap:
+    build: ./ldap
+    hostname: ldap  # o certificado de teste é emitido para este nome
+    environment:
+      LDAP_SENHA_LEITOR: ${LDAP_SENHA_LEITOR:?rode ./preparar.sh}
+      LDAP_SENHA_PESSOAS: ${LDAP_SENHA_PESSOAS:?rode ./preparar.sh}
+      LDAPTLS_CACERT: /certs-pub/ca.crt
+    volumes:
+      - ldap_ca:/certs-pub
+    healthcheck:
+      test: ["CMD-SHELL", "ldapsearch -H ldaps://ldap:636 -x -D cn=leitor,ou=servicos,dc=unib,dc=test -w \"$$LDAP_SENHA_LEITOR\" -b dc=unib,dc=test -s base dn >/dev/null"]
+      interval: 3s
+      timeout: 3s
+      retries: 40
+
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+      target: base
+    environment:
+      <<: *firebase
+      GOOGLE_APPLICATION_CREDENTIALS: /segredos/conta.json
+      GOOGLE_WEB_CLIENT_ID: ${GOOGLE_WEB_CLIENT_ID:-}
+      MS_CLIENT_ID: ${MS_CLIENT_ID:-}
+      MS_TENANT_ID: ${MS_TENANT_ID:-}
+      GOOGLE_HD: ${GOOGLE_HD:-}
+      CAFE_SP_LOGIN_URL: ${CAFE_SP_LOGIN_URL:-}
+      AMBIENTE_DE_TESTE: "1"  # liga a "CAFe simulada" e a limpeza dos testes; só vale em localhost
+      ORIGEM_FRONT: http://localhost:8088
+      SESSAO_SEGREDO: ${SESSAO_SEGREDO:?rode ./preparar.sh}
+      CAFE_PONTE_SEGREDO: ${CAFE_PONTE_SEGREDO:?rode ./preparar.sh}
+      LDAP_UNIB_SENHA: ${LDAP_SENHA_LEITOR}
+      MAX_IDADE_LOGIN_H: "12"
+      DB_CAMINHO: /dados/poc.sqlite3
+      INSTITUICOES_ARQUIVO: /srv/instituicoes.yaml
+    ports:  # só na própria máquina
+      - "127.0.0.1:8088:8088"
+    volumes:
+      - ldap_ca:/certs-pub:ro
+      - dados:/dados
+      - ./credenciais:/segredos:ro  # a chave de serviço do projeto; não entra no git
+    depends_on:
+      ldap: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8088/config.js', timeout=2)"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  # Testes que não precisam do Firebase: regras, verificadores e rotas (com o OpenLDAP de teste).
+  #   docker compose run --rm testes
+  testes:
+    profiles: [teste]
+    build: &build_testes
+      context: .
+      dockerfile: backend/Dockerfile
+      target: testes
+    environment:
+      LDAP_UNIB_SENHA: ${LDAP_SENHA_LEITOR}
+      LDAP_SENHA_PESSOAS: ${LDAP_SENHA_PESSOAS}
+      INSTITUICOES_ARQUIVO: /srv/instituicoes.yaml
+    volumes:
+      - ldap_ca:/certs-pub:ro
+    depends_on:
+      ldap: { condition: service_healthy }
+    command: ["pytest", "-q", "-p", "no:cacheprovider", "tests/unit", "tests/rotas"]
+
+  # Testes de ponta a ponta contra o projeto Firebase de verdade (precisa do backend no ar).
+  #   docker compose run --rm testes-firebase
+  testes-firebase:
+    profiles: [teste]
+    build: *build_testes
+    environment:
+      <<: *firebase
+      BACKEND_URL: http://backend:8088
+      ORIGEM_FRONT: http://localhost:8088
+      CAFE_PONTE_SEGREDO: ${CAFE_PONTE_SEGREDO}
+      LDAP_SENHA_PESSOAS: ${LDAP_SENHA_PESSOAS}
+    depends_on:
+      backend: { condition: service_healthy }
+    command: ["pytest", "-q", "-p", "no:cacheprovider", "tests/firebase_real"]
+
+  # Confere a página num Chromium sem tela, com o SDK web falando com o Firebase de verdade.
+  #   docker compose run --rm navegador
+  navegador:
+    profiles: [teste]
+    build: ./navegador
+    network_mode: "service:backend"  # localhost:8088 é o backend, como para quem testa à mão
+    environment:
+      LDAP_SENHA_PESSOAS: ${LDAP_SENHA_PESSOAS}
+    depends_on:
+      backend: { condition: service_healthy }
+
+volumes:
+  ldap_ca:
+  dados:
