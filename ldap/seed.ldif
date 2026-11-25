@@ -1,0 +1,47 @@
+dn: dc=unib,dc=test
+objectClass: top
+objectClass: dcObject
+objectClass: organization
+o: Universidade B (ficticia)
+dc: unib
+
+dn: ou=pessoas,dc=unib,dc=test
+objectClass: organizationalUnit
+ou: pessoas
+
+dn: ou=servicos,dc=unib,dc=test
+objectClass: organizationalUnit
+ou: servicos
+
+dn: cn=leitor,ou=servicos,dc=unib,dc=test
+objectClass: organizationalRole
+objectClass: simpleSecurityObject
+cn: leitor
+description: Conta de servico do IoTEdu, so leitura
+userPassword: @@HASH_LEITOR@@
+
+dn: uid=ana,ou=pessoas,dc=unib,dc=test
+objectClass: inetOrgPerson
+uid: ana
+cn: Ana Teste
+sn: Teste
+mail: ana@unib.test
+userPassword: @@HASH_ANA@@
+
+dn: uid=bruno,ou=pessoas,dc=unib,dc=test
+objectClass: inetOrgPerson
+uid: bruno
+cn: Bruno Teste
+sn: Teste
+mail: bruno@unib.test
+userPassword: @@HASH_BRUNO@@
+
+# O diretorio da Universidade B afirma um e-mail de outra instituicao.
+# O IoTEdu nao pode aceitar esse e-mail como prova.
+dn: uid=carla,ou=pessoas,dc=unib,dc=test
+objectClass: inetOrgPerson
+uid: carla
+cn: Carla Teste
+sn: Teste
+mail: reitoria@unia.test
+userPassword: @@HASH_CARLA@@
