@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>IoTEdu · login pelo Firebase</title>
+  <link rel="stylesheet" href="estilo.css">
+</head>
+<body>
+  <main>
+    <h1>Login do IoTEdu pelo Firebase</h1>
+    <p id="modo" class="aviso" hidden></p>
+
+    <section>
+      <label for="inst">Instituição</label>
+      <select id="inst"></select>
+
+      <div class="botoes">
+        <button id="google" type="button">Entrar com Google</button>
+        <button id="microsoft" type="button">Entrar com Microsoft</button>
+        <button id="cafe" type="button">Entrar pela CAFe</button>
+      </div>
+
+      <form id="ldap" autocomplete="off">
+        <h2>Usuário e senha da instituição (LDAP)</h2>
+        <label for="usuario">Usuário</label>
+        <input id="usuario" name="usuario" autocomplete="username" required maxlength="64">
+        <label for="senha">Senha</label>
+        <input id="senha" name="senha" type="password" autocomplete="current-password" required>
+        <button type="submit">Entrar</button>
+      </form>
+
+      <p id="erro" class="erro" role="alert" hidden></p>
+    </section>
+
+    <section id="resultado" hidden>
+      <h2>Quem entrou</h2>
+      <p id="resumo"></p>
+      <h3>Claims do ID token do Firebase</h3>
+      <pre id="claims"></pre>
+      <h3>O que o backend responde</h3>
+      <pre id="respostas"></pre>
+      <button id="sair" type="button">Sair</button>
+    </section>
+  </main>
+
+  <script src="/config.js"></script>
+  <script type="module" src="app.js"></script>
+</body>
+</html>

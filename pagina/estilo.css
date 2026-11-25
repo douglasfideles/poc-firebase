@@ -1,0 +1,81 @@
+:root {
+  --fundo: #f6f7f9;
+  --cartao: #ffffff;
+  --texto: #1b1f24;
+  --suave: #5b6570;
+  --borda: #d5dae0;
+  --acao: #1f5fbf;
+  --acao-texto: #ffffff;
+  --erro: #b3261e;
+  --aviso-fundo: #fff4d6;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --fundo: #14171b;
+    --cartao: #1d2126;
+    --texto: #e8eaed;
+    --suave: #a3acb6;
+    --borda: #343a42;
+    --acao: #7aa7f0;
+    --acao-texto: #10151c;
+    --erro: #f2b8b5;
+    --aviso-fundo: #3a3214;
+  }
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--fundo);
+  color: var(--texto);
+  font: 16px/1.5 system-ui, sans-serif;
+}
+main { max-width: 44rem; margin: 0 auto; padding: 1.5rem 1rem 3rem; }
+h1 { font-size: 1.5rem; margin: 0 0 1rem; }
+h2 { font-size: 1.1rem; margin: 0 0 .5rem; }
+h3 { font-size: 1rem; margin: 1rem 0 .25rem; color: var(--suave); }
+section {
+  background: var(--cartao);
+  border: 1px solid var(--borda);
+  border-radius: .5rem;
+  padding: 1rem;
+  margin-bottom: 1rem;
+}
+label { display: block; margin: .75rem 0 .25rem; font-weight: 600; }
+select, input {
+  width: 100%;
+  padding: .5rem;
+  font: inherit;
+  color: inherit;
+  background: var(--fundo);
+  border: 1px solid var(--borda);
+  border-radius: .375rem;
+}
+.botoes { display: flex; flex-wrap: wrap; gap: .5rem; margin: 1rem 0; }
+button {
+  padding: .55rem 1rem;
+  font: inherit;
+  font-weight: 600;
+  color: var(--acao-texto);
+  background: var(--acao);
+  border: 0;
+  border-radius: .375rem;
+  cursor: pointer;
+}
+button:disabled, button[aria-disabled="true"] { opacity: .45; cursor: not-allowed; }
+button:focus-visible, select:focus-visible, input:focus-visible {
+  outline: 3px solid var(--acao);
+  outline-offset: 2px;
+}
+form { border-top: 1px solid var(--borda); margin-top: 1rem; padding-top: 1rem; }
+form button { margin-top: 1rem; }
+pre {
+  margin: 0;
+  padding: .75rem;
+  overflow-x: auto;
+  background: var(--fundo);
+  border: 1px solid var(--borda);
+  border-radius: .375rem;
+  font-size: .85rem;
+}
+.aviso { background: var(--aviso-fundo); padding: .75rem; border-radius: .375rem; }
+.erro { color: var(--erro); font-weight: 600; }
