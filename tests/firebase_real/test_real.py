@@ -2,15 +2,19 @@
 
 Precisa do backend no ar com a chave de serviço do projeto e do `FIREBASE_WEB_API_KEY`. Aqui os
 tokens são emitidos e assinados pelo Firebase, e as trocas passam pela API pública dele, a mesma
-que o SDK web usa. Os logins são LDAP e CAFe (com o SP simulado), porque são os que dispensam uma
-pessoa digitando a senha numa tela do Google ou da Microsoft.
+que o SDK web usa. Os logins são LDAP, CAFe (com o SP simulado) e o login único (com o provedor
+simulado), porque são os que dispensam uma pessoa digitando a senha numa tela do Google ou da
+Microsoft.
 
-As contas criadas (`ldap:...`, `cafe:...`) são apagadas do projeto antes e depois de cada teste.
+As contas criadas (`ldap:...`, `cafe:...`, `oidc:...`) são apagadas do projeto antes e depois de
+cada teste.
 """
 import base64
 import json
 import os
 import time
+
+from urllib.parse import parse_qs, urlsplit
 
 import httpx
 import pytest
@@ -107,6 +111,29 @@ def test_cafe_de_ponta_a_ponta_com_o_sp_simulado():
         claims = claims_de(troca.json()["idToken"])
         assert (claims["user_id"], claims["inst"]) == ("cafe:ana@unia.test", "unia")
         assert abrir_sessao(c, troca.json()["idToken"]).json()["email"] == "ana@unia.test"
+
+
+def test_login_unico_de_ponta_a_ponta_com_o_provedor_simulado():
+    with cliente() as c:
+        ida = c.get("/api/auth/oidc/login", params={"inst": "unid"})
+        assert ida.status_code == 303, ida.text
+        pedido = {k: v[0] for k, v in parse_qs(urlsplit(ida.headers["location"]).query).items()
+                  if k != "scope"}  # o que a tela do provedor devolve no formulário
+        # A pessoa entra na tela do provedor, que devolve o navegador ao backend com o código.
+        r = c.post("/demo/oidc/authorize", data={**pedido, "sub": "d-0001", "nome": "Davi Teste",
+                                                 "email": "davi@unid.test", "verificado": "on"})
+        assert r.status_code == 303, r.text
+        volta = urlsplit(r.headers["location"])
+        assert c.get(f"{volta.path}?{volta.query}").status_code == 200
+        troca = trocar_custom(c.post("/api/auth/oidc/token", json={}).json()["custom_token"])
+        assert troca.status_code == 200, troca.text
+        claims = claims_de(troca.json()["idToken"])
+        assert (claims["user_id"], claims["inst"], claims["estado"]) == (
+            "oidc:unid:d-0001", "unid", "ativo")
+        assert claims["firebase"]["sign_in_provider"] == "custom" and "email" not in claims
+        s = abrir_sessao(c, troca.json()["idToken"])
+        assert s.status_code == 200 and s.json()["email"] == "davi@unid.test"
+        assert c.get("/api/painel").json()["inst"] == "unid"
 
 
 def test_token_com_assinatura_adulterada_e_recusado():

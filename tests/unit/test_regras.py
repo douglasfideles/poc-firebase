@@ -71,3 +71,23 @@ def test_cafe_com_escopo_desconhecido_fica_pendente(insts):
 
 def test_provedor_desconhecido_recusa(insts):
     assert decidir(ProvaLogin("senha", "x"), insts).estado == RECUSADO
+
+
+def test_login_unico_entra_na_instituicao_do_provedor_que_assinou(insts):
+    d = decidir(ProvaLogin("oidc", "unid:u-1", email="davi@unid.test", email_verificado=True,
+                           inst_oidc="unid"), insts)
+    assert (d.estado, d.inst, d.email_provado) == (ATIVO, "unid", "davi@unid.test")
+
+
+def test_login_unico_so_prova_email_verificado_e_do_dominio_da_instituicao(insts):
+    nao_verificado = decidir(ProvaLogin("oidc", "unid:u-1", email="davi@unid.test",
+                                        inst_oidc="unid"), insts)
+    de_fora = decidir(ProvaLogin("oidc", "unid:u-1", email="reitoria@unia.test",
+                                 email_verificado=True, inst_oidc="unid"), insts)
+    assert (nao_verificado.estado, nao_verificado.email_provado) == (ATIVO, None)
+    assert (de_fora.estado, de_fora.email_provado) == (ATIVO, None)
+
+
+def test_login_unico_em_instituicao_sem_ele_e_recusado(insts):
+    for inst in ("unia", "nao-existe", None):
+        assert decidir(ProvaLogin("oidc", "x:u-1", inst_oidc=inst), insts).estado == RECUSADO

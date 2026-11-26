@@ -101,7 +101,73 @@ def ambiente(tmp_path):
 
 def test_partida_normal(ambiente):
     cfg = carregar(ambiente())
-    assert cfg.projeto == "iotedu-teste" and cfg.ambiente_de_teste is False and cfg.avisos == ()
+    assert cfg.projeto == "iotedu-teste" and cfg.ambiente_de_teste is False
+    assert cfg.avisos == ("unid: o login único simulado só existe no ambiente de teste: desligado.",)
+
+
+def test_login_unico_simulado_so_existe_no_ambiente_de_teste(ambiente):
+    assert "oidc" not in carregar(ambiente()).instituicoes["unid"].metodos
+    teste = carregar(ambiente(AMBIENTE_DE_TESTE="1"))
+    oidc = teste.instituicoes["unid"].oidc
+    assert "oidc" in teste.instituicoes["unid"].metodos and teste.avisos == ()
+    assert (oidc.emissor, oidc.client_id, oidc.segredo_env) == (
+        "http://localhost:8088/demo/oidc", "iotedu-poc", "")
+
+
+def test_login_unico_de_verdade_vem_do_ambiente_e_sem_ele_fica_desligado(ambiente):
+    assert carregar(ambiente()).instituicoes["unib"].metodos == ("ldap",)
+    com = carregar(ambiente(OIDC_EMISSOR="https://sso.unib.test/realms/unib/", OIDC_CLIENT_ID="iotedu"))
+    oidc = com.instituicoes["unib"].oidc
+    assert com.instituicoes["unib"].metodos == ("ldap", "oidc")
+    assert (oidc.emissor, oidc.client_id, oidc.segredo_env) == (
+        "https://sso.unib.test/realms/unib", "iotedu", "OIDC_SEGREDO")
+    # Emissor http só é aceito no ambiente de teste, que só existe na própria máquina.
+    with pytest.raises(ErroDeConfig):
+        carregar(ambiente(OIDC_EMISSOR="http://sso.unib.test/realms/unib", OIDC_CLIENT_ID="iotedu"))
+
+
+def cadastro(tmp_path, bloco: str) -> str:
+    arquivo = tmp_path / "instituicoes.yaml"
+    arquivo.write_text("instituicoes:\n  x:\n    nome: X\n" + bloco, encoding="utf-8")
+    return str(arquivo)
+
+
+LDAP_AD = """    metodos: [ldap]
+    ldap:
+      tipo: ad
+      url: ldaps://dc1.x.test:636
+      base: dc=x,dc=test
+      bind_dn: cn=iotedu,ou=servicos,dc=x,dc=test
+      senha_env: LDAP_X_SENHA
+      ca: /certs/x.crt
+"""
+
+
+def test_active_directory_muda_so_o_filtro_e_os_atributos(ambiente, tmp_path):
+    ad = carregar(ambiente(INSTITUICOES_ARQUIVO=cadastro(tmp_path, LDAP_AD))).instituicoes["x"].ldap
+    assert "sAMAccountName={usuario}" in ad.filtro and "userAccountControl" in ad.filtro
+    assert (ad.attr_uid, ad.attr_nome, ad.attr_mail) == ("sAMAccountName", "displayName", "mail")
+    # O que a instituição escrever no cadastro vale mais que o padrão do tipo.
+    proprio = LDAP_AD + "      filtro: \"(userPrincipalName={usuario})\"\n      attr_uid: objectGUID\n"
+    ad = carregar(ambiente(INSTITUICOES_ARQUIVO=cadastro(tmp_path, proprio))).instituicoes["x"].ldap
+    assert (ad.filtro, ad.attr_uid) == ("(userPrincipalName={usuario})", "objectGUID")
+
+
+@pytest.mark.parametrize("bloco", [
+    LDAP_AD.replace("tipo: ad", "tipo: novell"),                    # tipo que não existe
+    LDAP_AD.replace("ldaps://", "ldap://"),                         # senha sem TLS
+    LDAP_AD + "      filtro: \"(objectClass=user)\"\n",            # filtro que acharia qualquer um
+    "    metodos: [oidc]\n",                                        # método ligado sem o bloco
+    "    metodos: [oidc]\n    oidc: {emissor: 'http://sso.x.test', client_id: iotedu}\n",
+    "    metodos: [oidc]\n    oidc: {emissor: 'https://sso.x.test', client_id: ''}\n",
+    "    metodos: [oidc]\n    oidc: {emissor: 'https://sso.x.test', client_id: a, escopos: email}\n",
+    # o mesmo provedor em duas instituições: a pessoa escolheria em qual entra aprovada
+    "    metodos: [oidc]\n    oidc: {emissor: 'https://sso.x.test', client_id: a}\n"
+    "  y:\n    metodos: [oidc]\n    oidc: {emissor: 'https://sso.x.test/', client_id: b}\n",
+])
+def test_partida_recusa_cadastro_de_instituicao_inseguro(ambiente, tmp_path, bloco):
+    with pytest.raises(ErroDeConfig):
+        carregar(ambiente(INSTITUICOES_ARQUIVO=cadastro(tmp_path, bloco)))
 
 
 @pytest.mark.parametrize("mudancas", [
@@ -125,7 +191,8 @@ def test_sem_o_client_id_o_login_do_provedor_fica_desligado(ambiente):
     cfg = carregar(ambiente(MS_CLIENT_ID=""))
     assert "microsoft" not in cfg.instituicoes["unia"].metodos
     assert "google" in cfg.instituicoes["unia"].metodos
-    assert len(cfg.avisos) == 1 and "MS_CLIENT_ID" in cfg.avisos[0]
+    assert [a for a in cfg.avisos if "unid" not in a] == [
+        "MS_CLIENT_ID não definido: login com microsoft desligado."]
 
 
 def test_identificadores_reais_vem_do_ambiente_e_nao_do_arquivo(ambiente):
@@ -145,7 +212,7 @@ def test_rotas_de_teste_nao_existem_sem_o_ambiente_de_teste(ambiente, monkeypatc
     assert "/api/auth/ldap/login" in fora
     assert not any(c.startswith("/demo") for c in fora)
     dentro = {r.path for r in modulo.criar_app(carregar(ambiente(AMBIENTE_DE_TESTE="1"))).routes}
-    assert "/demo/cafe/sp" in dentro
+    assert "/demo/cafe/sp" in dentro and "/demo/oidc/authorize" in dentro
 
 
 def test_sem_sp_e_sem_ambiente_de_teste_a_cafe_avisa_que_nao_esta_configurada(ambiente, monkeypatch):
@@ -161,6 +228,13 @@ def test_sem_sp_e_sem_ambiente_de_teste_a_cafe_avisa_que_nao_esta_configurada(am
 def test_custom_token_so_para_logins_que_o_backend_prova(uid):
     with pytest.raises(ValueError):
         fb.emitir_custom_token(uid)
+
+
+def test_identificador_longo_demais_vira_resumo_para_caber_no_firebase():
+    assert fb.uid_custom("oidc", "unid", " u-1 ") == "oidc:unid:u-1"
+    longo = fb.uid_custom("oidc", "unid", "x" * 200)
+    assert longo.startswith("oidc:unid:") and len(longo) <= fb.TAMANHO_MAXIMO_UID
+    assert longo == fb.uid_custom("oidc", "unid", "x" * 200) != fb.uid_custom("oidc", "unid", "y" * 200)
 
 
 def test_login_antigo_e_recusado():

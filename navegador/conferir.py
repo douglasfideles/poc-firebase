@@ -3,9 +3,11 @@
 Roda dentro da rede do backend (network_mode: service:backend), então `localhost:8088` é o
 backend, como no navegador de quem testa à mão. O SDK web fala direto com o Firebase.
 
-Cobre LDAP e CAFe (com o SP simulado). Google e Microsoft ficam para a conferência manual: as
-telas de login deles não aceitam navegador automatizado.
+Cobre LDAP, CAFe (com o SP simulado) e o login único da instituição (com o provedor simulado).
+Google e Microsoft ficam para a conferência manual: as telas de login deles não aceitam navegador
+automatizado. Com o Keycloak de teste ligado (README, passo 4), confere também o login por ele.
 """
+import json
 import os
 import sys
 
@@ -79,13 +81,76 @@ def cafe(navegador):
     contexto.close()
 
 
+def login_unico(navegador):
+    contexto, pagina, erros = nova_pagina(navegador)
+    pagina.select_option("#inst", "unid")
+    assert pagina.inner_text("#oidc") == "Login único da Universidade D"
+    assert pagina.is_disabled("#cafe") and pagina.is_hidden("#ldap")
+    with pagina.expect_popup() as info:
+        pagina.click("#oidc")
+    popup = info.value
+    popup.wait_for_selector("form button")  # o login único simulado
+    assert "/demo/oidc/authorize" in popup.url and "code_challenge=" in popup.url
+    popup.click("form button")
+    resumo, respostas, claims = esperar_resultado(pagina)
+    assert "Entrou em unid" in resumo, resumo
+    assert '"user_id": "oidc:unid:d-0001"' in claims and '"inst": "unid"' in claims, claims
+    assert "davi@unid.test" in respostas and '"via": "bearer"' in respostas, respostas
+    assert not erros, erros
+    contexto.close()
+
+
+def keycloak_ligado() -> bool:
+    """O login único da Universidade B só aparece na configuração com o Keycloak configurado."""
+    texto = httpx.get(f"{PAINEL}/config.js", timeout=30).text
+    config = json.loads(texto[texto.index("{"):texto.rindex("}") + 1])
+    return any(i["slug"] == "unib" and "oidc" in i["metodos"] for i in config["instituicoes"])
+
+
+def keycloak(navegador):
+    contexto, pagina, erros = nova_pagina(navegador)
+    # A mesma pessoa, primeiro pelo LDAP direto...
+    pagina.select_option("#inst", "unib")
+    pagina.fill("#usuario", "ana")
+    pagina.fill("#senha", SENHA)
+    pagina.click("#ldap button")
+    _, respostas, claims = esperar_resultado(pagina)
+    pelo_ldap = json.loads(respostas)["GET /api/me (cookie)"]["corpo"]
+    assert json.loads(claims)["user_id"] == "ldap:unib:ana"
+    pagina.click("#sair")
+    pagina.wait_for_selector("#resultado", state="hidden")
+    # ...e depois pelo Keycloak, que lê o mesmo diretório. A senha é digitada na tela dele.
+    with pagina.expect_popup() as info:
+        pagina.click("#oidc")
+    popup = info.value
+    popup.wait_for_selector("#username", timeout=60000)
+    assert popup.url.startswith("http://localhost:8089/realms/unib/"), popup.url
+    popup.fill("#username", "ana")
+    popup.fill("#password", SENHA)
+    popup.click("#kc-login")
+    resumo, respostas, claims = esperar_resultado(pagina)
+    assert "Entrou em unib" in resumo, resumo
+    c = json.loads(claims)
+    assert c["user_id"].startswith("oidc:unib:") and c["inst"] == "unib", claims
+    assert c["firebase"]["sign_in_provider"] == "custom" and "email" not in c, claims
+    pelo_keycloak = json.loads(respostas)["GET /api/me (cookie)"]["corpo"]
+    # O Keycloak afirma o e-mail como verificado: os dois logins viram a mesma pessoa.
+    assert pelo_keycloak["email"] == "ana@unib.test", respostas
+    assert pelo_keycloak["usuario_id"] == pelo_ldap["usuario_id"], (pelo_ldap, pelo_keycloak)
+    assert not erros, erros
+    contexto.close()
+
+
 CASOS = [
     ("LDAP: entra, mostra cookie e Bearer, sai", ldap),
     ("LDAP: senha errada mostra o erro e não entra", ldap_senha_errada),
     ("CAFe: popup, aviso entre janelas e troca do código", cafe),
+    ("Login único (OIDC): popup no provedor, volta e troca do código", login_unico),
 ]
 
 if __name__ == "__main__":
+    if keycloak_ligado():
+        CASOS.append(("Keycloak na frente do LDAP: senha na tela dele, mesma pessoa do LDAP", keycloak))
     falhas = 0
     with sync_playwright() as p:
         navegador = p.chromium.launch()

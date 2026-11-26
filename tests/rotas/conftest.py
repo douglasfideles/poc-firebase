@@ -37,4 +37,7 @@ def amb(monkeypatch, tmp_path) -> Ambiente:
         "INSTITUICOES_ARQUIVO": os.environ["INSTITUICOES_ARQUIVO"],
     })
     verificador = VerificadorJWKS("cid-google", "cid-ms", obter_chave=lambda p, t: CHAVE.public_key())
-    return Ambiente(criar_app(cfg, verificador=verificador), substituto)
+    app = criar_app(cfg, verificador=verificador)
+    # O backend fala com o login único simulado por HTTP. Nos testes, esse HTTP cai no próprio app.
+    app.state.oidc.http = TestClient(app, base_url=ORIGEM)
+    return Ambiente(app, substituto)
