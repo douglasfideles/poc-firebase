@@ -1,4 +1,4 @@
-// Página de demonstração: os quatro logins, todos terminando numa conta do Firebase.
+// Página de demonstração: os cinco logins, todos terminando numa conta do Firebase.
 // Sem build: o SDK web vem do CDN oficial, com a versão fixada.
 import { initializeApp } from "https://www.gstatic.com/firebasejs/13.4.0/firebase-app.js";
 import {
@@ -73,7 +73,7 @@ async function concluir(usuario, provedorIdToken) {
 
 // Fechar a janela de login ou abrir outra por cima não é erro: a pessoa só desistiu daquela tentativa.
 const DESISTENCIAS = ["auth/cancelled-popup-request", "auth/popup-closed-by-user"];
-const BOTOES = ["google", "microsoft", "cafe", "sair"];
+const BOTOES = ["google", "microsoft", "cafe", "oidc", "sair"];
 let emAndamento = false;
 
 async function tentar(acao) {
@@ -131,25 +131,34 @@ $("ldap").addEventListener("submit", (ev) => {
   });
 });
 
-$("cafe").addEventListener("click", () => {
+// CAFe e login único da instituição: a pessoa se identifica numa janela, fora do Firebase. A janela
+// só avisa que terminou; quem busca o custom token é esta página.
+function entrarPorJanela(metodo, endereco, nome) {
   if (emAndamento) return;
   // A janela abre no próprio clique, senão o navegador a bloqueia.
-  const popup = window.open("/api/auth/cafe/login", "cafe", "width=520,height=640");
+  const popup = window.open(endereco, metodo, "width=520,height=640");
   if (!popup) return mostrarErro("O navegador bloqueou a janela de login.");
   const ouvir = (ev) => {
     // Só a nossa origem e só a janela que abrimos.
     if (ev.origin !== window.location.origin || ev.source !== popup) return;
     window.removeEventListener("message", ouvir);
     tentar(async () => {
-      if (ev.data?.tipo !== "cafe-ok") throw new Error("O login pela CAFe não foi concluído.");
-      const r = await postar("/api/auth/cafe/token");
+      if (ev.data?.tipo !== `${metodo}-ok`) throw new Error(`O login ${nome} não foi concluído.`);
+      const r = await postar(`/api/auth/${metodo}/token`);
       if (r.status !== 200) throw new Error(r.corpo?.detail || "Não foi possível entrar.");
       const cred = await signInWithCustomToken(auth, r.corpo.custom_token);
       await concluir(cred.user, null);
     });
   };
   window.addEventListener("message", ouvir);
-});
+}
+
+$("cafe").addEventListener("click", () =>
+  entrarPorJanela("cafe", "/api/auth/cafe/login", "pela CAFe"));
+
+$("oidc").addEventListener("click", () =>
+  entrarPorJanela("oidc", `/api/auth/oidc/login?inst=${encodeURIComponent($("inst").value)}`,
+    "da instituição"));
 
 $("sair").addEventListener("click", () => tentar(async () => {
   await postar("/api/auth/logout");
@@ -162,6 +171,8 @@ function atualizarBotoes() {
   $("google").disabled = !metodos.includes("google");
   $("microsoft").disabled = !metodos.includes("microsoft");
   $("cafe").disabled = !metodos.includes("cafe");
+  $("oidc").disabled = !metodos.includes("oidc");
+  $("oidc").textContent = instituicao()?.oidcRotulo || "Login da instituição";
   $("ldap").hidden = !metodos.includes("ldap");
 }
 
@@ -175,7 +186,7 @@ $("inst").addEventListener("change", atualizarBotoes);
 atualizarBotoes();
 
 const avisos = [...(C.avisos || [])];
-if (C.teste) avisos.push("Ambiente de teste: o botão da CAFe abre uma universidade simulada.");
+if (C.teste) avisos.push("Ambiente de teste: a CAFe abre uma universidade simulada.");
 if (avisos.length) {
   $("modo").textContent = avisos.join(" ");
   $("modo").hidden = false;
