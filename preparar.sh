@@ -1,5 +1,6 @@
 #!/bin/sh
 # Prepara o .env: gera os segredos que faltam e deixa os campos do Firebase para preencher.
+# Só acrescenta o que falta: nunca muda um valor que já está no .env.
 set -eu
 cd "$(dirname "$0")"
 umask 077
@@ -12,7 +13,9 @@ gerar SESSAO_SEGREDO 48
 gerar CAFE_PONTE_SEGREDO 48
 gerar LDAP_SENHA_LEITOR 24
 gerar LDAP_SENHA_PESSOAS 18
-for c in FIREBASE_PROJECT_ID FIREBASE_WEB_API_KEY FIREBASE_AUTH_DOMAIN GOOGLE_WEB_CLIENT_ID GOOGLE_HD MS_CLIENT_ID MS_TENANT_ID CAFE_SP_LOGIN_URL; do
+gerar OIDC_SEGREDO 32
+gerar KEYCLOAK_ADMIN_SENHA 18
+for c in FIREBASE_PROJECT_ID FIREBASE_WEB_API_KEY FIREBASE_AUTH_DOMAIN GOOGLE_WEB_CLIENT_ID GOOGLE_HD MS_CLIENT_ID MS_TENANT_ID CAFE_SP_LOGIN_URL OIDC_EMISSOR OIDC_CLIENT_ID; do
   campo "$c"
 done
 faltam=""

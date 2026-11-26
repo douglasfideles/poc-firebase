@@ -1,0 +1,113 @@
+{
+  "realm": "unib",
+  "enabled": true,
+  "displayName": "Universidade B (teste)",
+  "sslRequired": "none",
+  "registrationAllowed": false,
+  "resetPasswordAllowed": false,
+  "editUsernameAllowed": false,
+  "loginWithEmailAllowed": false,
+  "clients": [
+    {
+      "clientId": "iotedu-poc",
+      "name": "IoTEdu PoC",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "clientAuthenticatorType": "client-secret",
+      "secret": "${OIDC_SEGREDO}",
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "redirectUris": ["http://localhost:8088/api/auth/oidc/callback"],
+      "webOrigins": [],
+      "attributes": { "pkce.code.challenge.method": "S256" }
+    }
+  ],
+  "components": {
+    "org.keycloak.storage.UserStorageProvider": [
+      {
+        "name": "ldap-unib",
+        "providerId": "ldap",
+        "subComponents": {
+          "org.keycloak.storage.ldap.mappers.LDAPStorageMapper": [
+            {
+              "name": "username",
+              "providerId": "user-attribute-ldap-mapper",
+              "subComponents": {},
+              "config": {
+                "ldap.attribute": ["uid"],
+                "user.model.attribute": ["username"],
+                "is.mandatory.in.ldap": ["true"],
+                "always.read.value.from.ldap": ["false"],
+                "read.only": ["true"]
+              }
+            },
+            {
+              "name": "email",
+              "providerId": "user-attribute-ldap-mapper",
+              "subComponents": {},
+              "config": {
+                "ldap.attribute": ["mail"],
+                "user.model.attribute": ["email"],
+                "is.mandatory.in.ldap": ["false"],
+                "always.read.value.from.ldap": ["true"],
+                "read.only": ["true"]
+              }
+            },
+            {
+              "name": "first name",
+              "providerId": "user-attribute-ldap-mapper",
+              "subComponents": {},
+              "config": {
+                "ldap.attribute": ["givenName"],
+                "user.model.attribute": ["firstName"],
+                "is.mandatory.in.ldap": ["false"],
+                "always.read.value.from.ldap": ["true"],
+                "read.only": ["true"]
+              }
+            },
+            {
+              "name": "last name",
+              "providerId": "user-attribute-ldap-mapper",
+              "subComponents": {},
+              "config": {
+                "ldap.attribute": ["sn"],
+                "user.model.attribute": ["lastName"],
+                "is.mandatory.in.ldap": ["false"],
+                "always.read.value.from.ldap": ["true"],
+                "read.only": ["true"]
+              }
+            }
+          ]
+        },
+        "config": {
+          "enabled": ["true"],
+          "priority": ["0"],
+          "vendor": ["other"],
+          "editMode": ["READ_ONLY"],
+          "importEnabled": ["true"],
+          "syncRegistrations": ["false"],
+          "connectionUrl": ["ldaps://ldap:636"],
+          "useTruststoreSpi": ["always"],
+          "authType": ["simple"],
+          "bindDn": ["cn=leitor,ou=servicos,dc=unib,dc=test"],
+          "bindCredential": ["${LDAP_SENHA_LEITOR}"],
+          "usersDn": ["ou=pessoas,dc=unib,dc=test"],
+          "searchScope": ["1"],
+          "userObjectClasses": ["inetOrgPerson"],
+          "usernameLDAPAttribute": ["uid"],
+          "rdnLDAPAttribute": ["uid"],
+          "uuidLDAPAttribute": ["entryUUID"],
+          "trustEmail": ["true"],
+          "pagination": ["false"],
+          "connectionPooling": ["false"],
+          "fullSyncPeriod": ["-1"],
+          "changedSyncPeriod": ["-1"],
+          "cachePolicy": ["NO_CACHE"]
+        }
+      }
+    ]
+  }
+}

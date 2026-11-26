@@ -24,6 +24,7 @@ dn: uid=ana,ou=pessoas,dc=unib,dc=test
 objectClass: inetOrgPerson
 uid: ana
 cn: Ana Teste
+givenName: Ana
 sn: Teste
 mail: ana@unib.test
 userPassword: @@HASH_ANA@@
@@ -32,6 +33,7 @@ dn: uid=bruno,ou=pessoas,dc=unib,dc=test
 objectClass: inetOrgPerson
 uid: bruno
 cn: Bruno Teste
+givenName: Bruno
 sn: Teste
 mail: bruno@unib.test
 userPassword: @@HASH_BRUNO@@
@@ -42,6 +44,7 @@ dn: uid=carla,ou=pessoas,dc=unib,dc=test
 objectClass: inetOrgPerson
 uid: carla
 cn: Carla Teste
+givenName: Carla
 sn: Teste
 mail: reitoria@unia.test
 userPassword: @@HASH_CARLA@@
