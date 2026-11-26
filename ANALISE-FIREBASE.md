@@ -14,19 +14,22 @@ possível provar está dito como tal, na seção 5.
 1. **O Firebase ainda não está em uso.** Na reunião foi dito que o login com Google já passa por ele. O
    código mostra OAuth direto com o Google, tanto no `iotedu-dockerized` quanto no `iotedu-stack`, que é o
    que roda na UFRGS e na Unipampa. Adotar o Firebase é trabalho novo (seção 2).
-2. **A decisão se sustenta para os quatro logins**: Google, Microsoft, LDAP e CAFe terminam todos numa
-   conta do Firebase, com a instituição e o papel dentro do token. Está implementado e testado: 100 testes
-   do nosso código, 9 de ponta a ponta contra um projeto Firebase de verdade (plano gratuito, sem cartão)
-   e 3 conferências da página num navegador, todos passando. Na tela, o login com Microsoft foi feito
-   com uma conta real de um diretório do Entra ID e entrou aprovado; o com Google, com uma conta pessoal,
-   ficou pendente, como deve. Falta o Google com conta de Workspace de uma instituição (seção 5).
+2. **A decisão se sustenta para os logins pedidos**: Google, Microsoft, LDAP e CAFe terminam todos numa
+   conta do Firebase, com a instituição e o papel dentro do token. Está implementado e testado: 160 testes
+   do nosso código, 10 de ponta a ponta contra um projeto Firebase de verdade (plano gratuito, sem cartão)
+   e 4 conferências da página num navegador (5 com o Keycloak de teste ligado), todos passando. Na tela, o
+   login com Microsoft foi feito com uma conta real de um diretório do Entra ID e entrou aprovado; o com
+   Google, com uma conta pessoal, ficou pendente, como deve. A aprovação do Google pelo domínio do Workspace
+   ainda não rodou com token real: falta uma conta de Workspace de uma instituição (seção 5).
 3. **O Firebase não conta autenticações, conta usuários ativos.** Quem entra 1 ou 30 vezes no mês conta uma
    vez. No desenho implementado não há cobrança por usuário e não é preciso cartão. Hoje são 21 usuários nas duas
    instalações (seção 4.1 e 4.2).
 4. **LDAP e CAFe não são feitos pelo Firebase.** Ele não fala LDAP e o SAML dele não aceita uma federação.
    Nos dois casos o nosso backend prova quem é a pessoa e pede ao Firebase um token para ela (custom token).
    Funciona e não custa nada, mas esse código continua nosso, e no LDAP a senha da pessoa passa pelo nosso
-   backend (seções 4.7 e 4.8).
+   backend (seções 4.7 e 4.8). O mesmo molde atende a instituição que tem login único próprio, como um
+   Keycloak: está implementado e foi testado com um Keycloak de verdade na frente do OpenLDAP de teste.
+   Nesse caminho a senha não passa pelo nosso backend (seção 4.9).
 5. **Conta por instituição ou global: depende de onde a chave do Firebase fica.** No núcleo em nuvem, um
    projeto global. No modelo atual, com uma instalação em cada instituição, um projeto por instalação,
    porque a chave que emite tokens não pode ficar no servidor de cada universidade (seção 4.4).
@@ -43,6 +46,8 @@ possível provar está dito como tal, na seção 5.
 | Microsoft | Não existe. | Provedor nativo do Firebase. |
 | LDAP | Não existe. | O backend faz o bind e pede um token ao Firebase. |
 | CAFe | SP SAML em Django, dentro do backend. Aguarda o cadastro na federação de produção. | O mesmo SP. No fim, o backend pede um token ao Firebase. |
+| IdP IoTEdu (o Keycloak da própria instalação, por OIDC) | Existe: é o terceiro login de hoje, com contas e senha no Keycloak da instalação. | Cai no caminho do login único (seção 4.9): o backend confere o token do Keycloak e pede um token ao Firebase. |
+| Login único da instituição (o Keycloak, ADFS ou parecido dela) | Não existe. | O mesmo caminho, apontado para o provedor da instituição. |
 | Sessão | Cookie assinado, com o e-mail dentro. | O mesmo cookie, ou o token do Firebase no cabeçalho. |
 
 Evidência de que o Firebase não está em uso:
@@ -61,7 +66,7 @@ também tem o Firebase ligado, mas o código não o usa.
 
 ## 3. Como o login fica
 
-Os quatro caminhos terminam no mesmo lugar: uma conta no Firebase com três claims gravados por nós
+Os caminhos terminam todos no mesmo lugar: uma conta no Firebase com três claims gravados por nós
 (`inst`, `papel`, `estado`) e a sessão do app.
 
 ```
@@ -76,6 +81,11 @@ LDAP                     navegador ──usuário e senha──> backend ──b
 CAFe                     popup ──SAML──> SP do IoTEdu (o que já existe) ──JWT de 120 s──> backend
                          backend: decide, grava os claims, guarda um código de uso único
                          navegador ──código──> backend ──custom token──> navegador ──> Firebase ──> backend (sessão)
+
+Login único              popup ──> tela de login da instituição (OIDC) ──código──> backend
+da instituição           backend ──código──> provedor da instituição ──ID token assinado──> backend
+                         backend: confere o token, decide, grava os claims, guarda um código de uso único
+                         navegador ──código──> backend ──custom token──> navegador ──> Firebase ──> backend (sessão)
 ```
 
 A regra de entrada é a da decisão D33: entra na hora quem prova pelo login que é da instituição, e os
@@ -87,6 +97,7 @@ outros ficam pendentes da aprovação do gestor de rede. O que conta como prova 
 | Microsoft | O claim `tid` do ID token da Microsoft: o diretório do Entra ID. | Qualquer organização cria no próprio diretório uma conta com o e-mail que quiser. A Microsoft orienta a nunca autorizar por e-mail. |
 | LDAP | O bind deu certo no diretório cadastrado para aquela instituição. | O diretório de uma instituição pode ter um e-mail de outra. |
 | CAFe | O escopo do `eduPersonPrincipalName`, o que vem depois do `@`. | O atributo `mail` é livre. |
+| Login único da instituição | O ID token veio assinado pelo provedor cadastrado para aquela instituição. | O provedor pode deixar a pessoa digitar o próprio e-mail. |
 
 O ID token do Firebase não carrega `hd` nem `tid`. Por isso o navegador manda também o ID token do
 provedor, que ele recebe no popup, e o backend só o aceita com assinatura, audiência, emissor e validade
@@ -99,14 +110,16 @@ liga um login novo a uma pessoa que já existe quando o login provou esse e-mail
 
 ### 4.1 Quantas autenticações vamos ter por mês?
 
-O Firebase não mede autenticações. A unidade é o **usuário ativo**: uma conta que entrou pelo menos uma vez
-no período. Reautenticar não muda a conta
+O Firebase não mede autenticações. Sem o upgrade não há contagem nenhuma. Com o upgrade, a unidade é o
+**usuário ativo** (por dia sem cartão, por mês com cartão): uma conta que entrou pelo menos uma vez no
+período. Quem entra de novo no mesmo período não conta outra vez
 ([preços do Identity Platform](https://cloud.google.com/identity-platform/pricing)). O "15 mil
 autenticações grátis" citado em reuniões anteriores não existe nas páginas de preço.
 
-Hoje são 8 usuários na UFRGS e 13 na Unipampa (contagem da troca de 12/10/2026, no
-`HISTORICO-MODULARIZACAO.md` do `iotedu-stack`). Para frente, a premissa que o projeto já usa é de 300
-usuários por mês por instituição.
+Em 12/10/2026 havia 8 contas no banco da UFRGS e 13 no da Unipampa (contagem da troca daquele dia, no
+`HISTORICO-MODULARIZACAO.md` do `iotedu-stack`). São contas cadastradas, não usuários ativos no mês, e a
+contagem não foi refeita. Para frente, a análise usa 300 usuários por mês por instituição, o mesmo valor da
+projeção de custos de outubro. É uma hipótese: o grupo ainda não tem uma projeção de usuários.
 
 O número de logins só importa para os limites por minuto, que estão muito longe:
 
@@ -127,8 +140,9 @@ A hora mais cheia supõe 20% dos usuários do mês entrando na mesma hora. As du
 análise, e mudar o valor em `projecao.py` refaz a tabela. Mesmo com mil instituições, o pico fica em 2% do
 limite de logins.
 
-A verificação do token no backend é local, com as chaves públicas do Google em cache. Ela não consome cota,
-e o backend só procura o Google de tempos em tempos, para atualizar essas chaves
+A verificação do token no backend é local, com as chaves públicas do Google em cache. Ela não aparece em
+nenhuma tabela de limites, e o backend só procura o Google de tempos em tempos, para atualizar essas chaves.
+Isso vale enquanto a checagem de revogação estiver desligada
 ([verify-id-tokens](https://firebase.google.com/docs/auth/admin/verify-id-tokens)).
 
 ### 4.2 Quanto o gratuito suporta, e quando passa a custar?
@@ -141,7 +155,7 @@ oficial para voltar atrás.
 | Google, Microsoft, custom token | Sem cobrança por usuário e sem teto de usuários ativos. | Sem cartão: 3.000 usuários ativos por dia. Com cartão: 50.000 por mês sem custo, depois de US$ 0,0055 a 0,0025 por usuário. |
 | SAML e OIDC genérico | Não tem. | Sem cartão: 2 usuários por dia. Com cartão: 50 por mês sem custo, depois US$ 0,015 por usuário. |
 | Tenants (silo por instituição) | Não tem. | Sem cartão: 2 tenants. Com cartão: sem limite. |
-| SLA | Não tem. | 99,95%. |
+| SLA | Não tem. | 99,95%, mas só para login com e-mail e senha e para a renovação do token ([SLA](https://cloud.google.com/identity-platform/sla)). Login com Google, Microsoft e custom token não está coberto. A compensação é crédito sobre a fatura. |
 | Segundo fator, registros de auditoria, funções de bloqueio | Não tem. | Tem. |
 
 Fontes: [visão geral do Firebase Auth](https://firebase.google.com/docs/auth),
@@ -149,8 +163,12 @@ Fontes: [visão geral do Firebase Auth](https://firebase.google.com/docs/auth),
 [cotas do Identity Platform](https://docs.cloud.google.com/identity-platform/quotas),
 [SLA](https://cloud.google.com/identity-platform/sla).
 
-**O desenho implementado fica na coluna da esquerda.** Como LDAP e CAFe entram por custom token, nenhum dos
-quatro logins precisa de SAML, OIDC ou tenants do Firebase. Não há upgrade, não há cartão e não há cobrança
+As páginas oficiais divergem num ponto: a de preços do Firebase lista 50 mil usuários por mês para o
+projeto com upgrade e sem cartão, e as de limites e de cotas listam 3.000 por dia. A tabela usa o menor.
+A franquia de 50 usuários de SAML e OIDC é por projeto.
+
+**O desenho implementado fica na coluna da esquerda.** Como LDAP, CAFe e o login único da instituição
+entram por custom token, nenhum login precisa de SAML, OIDC ou tenants do Firebase. Não há upgrade, não há cartão e não há cobrança
 por usuário.
 
 <!-- tabela:uso -->
@@ -187,7 +205,8 @@ Limites que valem nos dois produtos ([limites do Firebase Auth](https://firebase
 | Contas novas | 100 por hora, **por endereço IP** | Pode pegar na primeira semana de uma instituição: o campus inteiro sai por um IP só. A página não diz a quais logins o limite se aplica. Fica para o teste com projeto real. |
 | Claims gravados por nós | 1.000 bytes por conta | Usamos três campos curtos. |
 | Validade do ID token | 1 hora | O navegador renova sozinho. |
-| Domínios autorizados | Sem wildcard | Um cadastro por endereço de painel (seção 4.3). |
+| Logins com Google e Microsoft | Sem linha própria. O teto geral da API é de 180.000 pedidos por minuto, por projeto | Não pega. |
+| Domínios autorizados | A lista não aceita `*`, mas um domínio vale para os subdomínios dele | Com os painéis em subdomínios de um domínio nosso, basta um cadastro (seção 4.3). |
 | Projetos por conta Google | Cerca de 5 a 10 sem cartão | Pesa na opção de um projeto por instituição (seção 4.4). |
 
 ### 4.3 Com múltiplos domínios, o que acontece?
@@ -199,10 +218,14 @@ provedor Google é um só para todas as contas Google. A lista de domínios é n
 (`dominios` e `google_hd` em `instituicoes.yaml`), e quem a confere é o backend.
 Teste: `test_google_com_conta_da_instituicao_entra_e_usa_o_painel`.
 
-**Endereços do painel.** O Firebase só aceita login a partir dos endereços da lista de domínios autorizados
-do projeto, e a lista não aceita wildcard. Com um subdomínio por instituição (D24), cada instituição nova é
-uma chamada de API a mais. Em compensação, o endereço de retorno cadastrado no Google e na Microsoft passa
-a ser um só, o do Firebase, e não mais um por instalação como hoje.
+**Endereços do painel.** O Firebase só aceita login a partir dos domínios da lista de domínios autorizados
+do projeto. A lista não aceita `*`, mas um domínio cadastrado vale para os subdomínios dele: é o que o
+código do SDK web faz, e foi conferido num navegador em 25/11. Com `localhost` na lista, o login a partir de
+`unia.localhost` e de `painel.unia.localhost` chegou à tela do Google; a partir de `127.0.0.1`, que não
+está na lista, o Firebase respondeu `auth/unauthorized-domain`. Com um subdomínio por instituição (D24)
+sob um domínio nosso, basta um cadastro. Só um painel em domínio próprio da instituição pede cadastro a
+mais. Falta repetir com um domínio de verdade. Além disso, o endereço de retorno cadastrado no Google e na
+Microsoft passa a ser um só, o do Firebase, e não mais um por instalação como hoje.
 
 **Diretórios da Microsoft.** O Firebase tem uma só configuração Microsoft por projeto. O aplicativo
 registrado no Entra ID tem de ser multilocatário, e cada universidade provavelmente precisa que o
@@ -215,7 +238,9 @@ administrador dela autorize o aplicativo uma vez. Isso só se confirma com um di
 - quem entrou com Google não consegue entrar depois com Microsoft no mesmo e-mail (o Firebase responde que
   a conta já existe com outra credencial);
 - quem chegar primeiro com um e-mail alheio, a partir de um diretório Microsoft qualquer, trava o login do
-  dono do e-mail.
+  dono do e-mail. A exceção é o dono entrar por um provedor que o Firebase considera confiável para aquele
+  endereço (o Google, para contas hospedadas no Google): nesse caso o provedor confiável substitui o outro
+  ([gerência de usuários](https://docs.cloud.google.com/identity-platform/docs/concepts-manage-users)).
 
 A saída é ligar no console a opção "criar várias contas para cada provedor de identidade". Ela combina com
 o nosso desenho, em que a chave é o par (provedor, identificador). O lado do backend está testado em
@@ -231,10 +256,10 @@ As três opções funcionam. A diferença está em quem garante o isolamento e e
 | | A. Um projeto global, instituição no claim | B. Um projeto, um tenant por instituição | C. Um projeto por instituição |
 |---|---|---|---|
 | Quem isola as instituições | Nós: o claim `inst` e a conferência no banco. | O Google: usuários e provedores separados por tenant. | O Google: projetos separados. |
-| Upgrade e cartão | Não precisa. | Precisa dos dois (sem cartão são 2 tenants). | Não precisa. |
+| Upgrade e cartão | Não precisa. | Precisa do upgrade e, a partir do terceiro tenant, do cartão. | Não precisa. |
 | Custo por usuário | Zero. | Zero até 50 mil por mês, depois cobra. | Zero. |
 | Configurar Google e Microsoft | Uma vez. | Uma vez por tenant. | Uma vez por projeto. |
-| Instituição nova | Uma linha de cadastro e um domínio autorizado. | Criar o tenant e os provedores dele. | Criar o projeto, os provedores, a chave e o domínio. Esbarra na cota de 5 a 10 projetos. |
+| Instituição nova | Uma linha de cadastro. | Criar o tenant e os provedores dele. | Criar o projeto, os provedores, a chave e o domínio. Esbarra na cota de 5 a 10 projetos. |
 | Pessoa em duas instituições | Uma conta, uma instituição ativa por vez. | Duas contas. | Duas contas. |
 | Dependência do Google | Média: lemos um claim comum do JWT. | Alta: o tenant vem de um campo do Google. | Média, multiplicada pelo número de projetos. |
 | Se a chave do projeto vaza | Emite token para qualquer pessoa de qualquer instituição. | Idem. | Só para aquela instituição. |
@@ -266,13 +291,17 @@ Muda cinco coisas.
    O núcleo em nuvem não alcança. Há dois caminhos, e nenhum foi testado: a instituição libera LDAPS para o
    endereço do núcleo, ou o bind roda no sistema que fica na instituição, que devolve ao núcleo uma
    afirmação assinada, como a ponte da CAFe faz. No segundo, falta decidir por onde a senha trafega.
+   Para a instituição que tem login único próprio há um terceiro caminho (seção 4.9): o núcleo só precisa
+   alcançar o endereço público do provedor dela, por HTTPS, e o diretório não é exposto. Ele foi testado
+   na própria máquina, com o provedor na mesma rede do backend; falta um provedor público.
 3. **Os endereços do painel entram na lista do Firebase** um a um, por API (seção 4.3).
 4. **A instituição passa a vir do token.** No desenho implementado o claim `inst` leva a instituição ativa, o
    backend nunca a tira do pedido, e antes de uma ação que altera algo confere no banco se a pessoa ainda é
    da instituição (D12). Teste: `test_token_sem_claims_e_tratado_como_pendente`.
 5. **O que hoje fica na memória de um processo precisa ir para um lugar compartilhado.** Na prova de
-   conceito são dois itens: o contador de tentativas de senha e o código de troca do login da CAFe. Com
-   mais de uma cópia da API eles vão para o cache compartilhado ou para o banco (D20).
+   conceito são três itens: o contador de tentativas de senha, o código de troca do login da CAFe e do
+   login único, e os logins únicos em andamento. Com mais de uma cópia da API eles vão para o cache
+   compartilhado ou para o banco (D20).
 
 O que não muda: a verificação do token é local, então o núcleo não precisa rodar no Google, e o volume de
 logins não se aproxima de nenhum limite.
@@ -283,10 +312,11 @@ O esforço tem duas partes: o que se configura em consoles e o que é código no
 
 | Login | No Firebase | Fora do Firebase | Código na prova de conceito | Prova de instituição |
 |---|---|---|---|---|
-| Google | Ligar o provedor. | Nada: o Firebase cria o client. | `provedores.py`, dividido com a Microsoft (128 linhas). | `hd` |
+| Google | Ligar o provedor. | Nada: o Firebase cria o client. | `provedores.py`, dividido com a Microsoft (106 linhas). | `hd` |
 | Microsoft | Ligar o provedor e colar o ID e o segredo. | Registrar o aplicativo no Entra ID. O segredo tem validade e precisa ser renovado. | O mesmo arquivo. | `tid` |
 | LDAP | Nada. | A instituição cria uma conta de serviço só de leitura e informa endereço, base e a CA. | `ldap_auth.py` (97 linhas) e `limite.py` (61). | bind |
 | CAFe | Nada. | O cadastro do SP na federação, que já estava pendente. | `ponte_cafe.py` (79 linhas), mais o SP Django que já existe. | escopo |
+| Login único da instituição (OIDC) | Nada. | A instituição registra o IoTEdu como cliente no provedor dela e informa o emissor, o identificador e o segredo. | `oidc_auth.py` (192 linhas). | emissor |
 | Apple | Provedor nativo. | Exige participar do programa de desenvolvedores da Apple, que é pago (o valor não foi conferido). | Uma entrada na tabela de provedores e o verificador do token. | Não há: a conta é pessoal. |
 | Facebook, GitHub, X e outras redes | Provedores nativos. O Instagram, citado na reunião, não está entre eles, pelo que lembro da lista; não conferi nesta rodada. | Registrar um aplicativo em cada uma. | Uma entrada na tabela. | Não há: a conta é pessoal. |
 
@@ -296,8 +326,8 @@ Três observações sobre a tabela.
   sempre pendente, à espera do gestor de rede. Ligar esses provedores é barato, mas eles só servem para o
   caso de aprovação manual. Para as primeiras instituições, os três que importam são os que a reunião
   listou: Google, Microsoft e LDAP, mais a CAFe.
-- **O Firebase não reduz o código de login.** A prova de conceito tem cerca de 1.400 linhas de Python, contra cerca
-  de 1.500 do login atual. A diferença é o que essas linhas fazem: cobrem dois logins que não existiam
+- **O Firebase não reduz o código de login.** A prova de conceito tem cerca de 2.200 linhas de Python (eram 1.400 antes do
+  login único e das ferramentas de teste), contra cerca de 1.500 do login atual. A diferença é o que essas linhas fazem: cobrem dois logins que não existiam
   (Microsoft e LDAP), a regra de entrada por instituição, que hoje não existe para o Google, e os cuidados
   de segurança da seção 6. O que o Firebase tira de nós é o protocolo OAuth com cada provedor, a emissão e
   a renovação de tokens e a guarda das contas.
@@ -321,6 +351,7 @@ Quem testa, e com o quê:
 | Microsoft de verdade | O mesmo projeto, um aplicativo registrado no Entra ID e uma conta de universidade que use Microsoft. |
 | LDAP de verdade | O endereço, a base e uma conta de serviço do OpenLDAP de uma instituição (a UFSM foi citada). |
 | CAFe de verdade | O cadastro do SP, pelo menos na federação de homologação. |
+| Login único de verdade | Uma instituição que tenha Keycloak, ADFS ou parecido, e o registro do IoTEdu como cliente nele. |
 
 A pergunta que a reunião mandou para o grupo dos líderes de implantação, "como são gerenciadas as contas
 institucionais?", define quais dessas linhas são urgentes. O roteiro para criar o projeto de teste está no
@@ -346,21 +377,30 @@ O que isso traz de novo para o projeto:
   O código não a registra nem a guarda, e um teste achou e fechou um vazamento: a mensagem de erro padrão do
   FastAPI devolvia o conteúdo recebido, inclusive a senha (`test_a_senha_nunca_aparece_na_resposta_de_erro`).
 - **Tentativa de senha é problema nosso.** Há um limite com atraso crescente, por pessoa e por endereço.
-  Não é bloqueio rígido, para ninguém conseguir travar a conta de outra pessoa
+  Não é bloqueio rígido, mas também não impede que alguém atrapalhe outra pessoa: quem erra a senha de um
+  colega a cada poucos minutos mantém o login dele em espera, e o contador por endereço não zera quando
+  alguém acerta, o que pesa num campus que sai por um IP só. O ajuste fica para o encaixe
   (`test_ldap_atrasa_depois_de_erros_seguidos_ate_para_a_senha_certa`).
 - **O e-mail que o diretório informa só vale se for de um domínio da própria instituição**
   (`test_ldap_email_de_outra_instituicao_nao_e_aceito_como_prova`).
 
-Active Directory também fala LDAP. Em princípio muda só a configuração (o filtro passa a usar
-`sAMAccountName`), mas isso não foi testado.
+Active Directory também fala LDAP. O cadastro aceita `tipo: ad`, que troca o filtro (busca por
+`sAMAccountName` e ignora conta desativada) e os atributos lidos. O código do bind é o mesmo. Isso não foi
+testado contra um Active Directory: o que os testes provam é só que o cadastro monta o filtro certo
+(`test_active_directory_muda_so_o_filtro_e_os_atributos`). Duas diferenças conhecidas ficam para o teste
+real: o `sAMAccountName` pode ser renomeado, e o identificador que não muda é o `objectGUID`; e uma
+instituição com o diretório sincronizado com o Entra ID pode usar o login da Microsoft em vez do LDAP.
+
+Para o primeiro contato com o diretório de uma instituição há um comando que confere o cadastro passo a
+passo e diz onde parou: conexão e certificado, conta de serviço, base, filtro, atributos e o login de uma
+pessoa (`python -m poc.conferir_ldap`, no README). Ele usa o mesmo código da rota
+(`test_conferencia_do_ldap_passa_com_o_diretorio_de_teste_e_diz_onde_parou`).
 
 A biblioteca usada, `ldap3`, teve a última versão estável em 2021. Funciona com Python 3.11, mas os avisos
 da execução mostram que ela usa funções que versões mais novas do Python removem. É um risco de manutenção. As alternativas (`python-ldap`, `bonsai`) exigem compilar bibliotecas do sistema.
 
-Alternativa não testada: pôr um Keycloak na frente do LDAP. A stack já tem um Keycloak, e ele sabe federar
-LDAP. O backend emitiria o custom token depois do login OIDC, que já existe. A senha deixaria de passar
-pelo nosso código, ao preço de mais uma peça para operar. Ligar o Keycloak direto no Firebase, como
-provedor OIDC, cairia na faixa paga e exigiria o upgrade.
+A alternativa é pôr um Keycloak na frente do LDAP: a senha deixa de passar pelo nosso código, ao preço de
+mais uma peça para operar. Ela foi implementada e testada, e está na seção 4.9.
 
 ### 4.8 CAFe
 
@@ -391,23 +431,76 @@ SP único para todas as instituições. A prova de conceito amarra a pessoa à i
 `eduPersonPrincipalName`. Seria mais firme o SP passar também o identificador da universidade que
 autenticou, e isso é um campo a mais no JWT.
 
+### 4.9 Outros logins: o login único da própria instituição
+
+A reunião listou Google, Microsoft, LDAP e CAFe. Falta um caso comum: a instituição que já tem um login
+único próprio (Keycloak, ADFS, Shibboleth com OIDC, Authentik). Todos falam OpenID Connect.
+
+O Firebase tem provedor OIDC genérico, mas só com o upgrade para Identity Platform, na faixa cobrada por
+usuário (seção 4.2), e com um provedor cadastrado por configuração. O caminho implementado é o mesmo do
+LDAP e da CAFe: quem fala com o provedor da instituição é o nosso backend, e o Firebase recebe um custom
+token. Não há upgrade nem custo por usuário.
+
+O que a prova de conceito faz (`backend/poc/oidc_auth.py`):
+
+1. Leva a pessoa, numa janela, à tela de login da instituição. O pedido leva um estado, um `nonce` e o
+   desafio PKCE. O `nonce` e o verificador PKCE ficam no backend; o navegador só leva o estado, assinado.
+2. Recebe o código de volta, confere o estado e troca o código pelo ID token, direto com o provedor.
+3. Confere o ID token: assinatura com as chaves que o provedor publica, emissor igual ao cadastrado,
+   audiência igual ao nosso cliente, validade e o `nonce` daquele login. Token sem assinatura ou assinado
+   com segredo compartilhado não é aceito.
+4. Grava a pessoa e os claims e entrega o custom token pelo mesmo mecanismo da CAFe: a janela só avisa
+   que terminou, e a janela principal busca o token.
+
+Foi testado de duas formas:
+
+- **Contra um provedor simulado**, que roda dentro do ambiente de teste e fala o protocolo de verdade.
+  É o que os testes automáticos usam, inclusive os de ponta a ponta com o Firebase e o do navegador.
+- **Contra um Keycloak de verdade** (versão 26.4.7, em container), configurado para ler as pessoas do
+  OpenLDAP de teste. A conferência no navegador entra primeiro pelo LDAP direto e depois pelo Keycloak, com
+  a senha digitada na tela dele. Passou: a conta no Firebase é outra (`oidc:unib:...`), a instituição vem
+  no token, e os dois logins viram a mesma pessoa no nosso banco, porque o Keycloak afirma o e-mail como
+  verificado. O teste foi na própria máquina, por HTTP, com o Keycloak na mesma rede do backend. Falta um
+  provedor público, por HTTPS.
+
+O que isso muda em relação ao LDAP direto:
+
+| | LDAP direto | Keycloak (ou outro login único) na frente |
+|---|---|---|
+| A senha da pessoa | Passa pelo nosso backend. | Não passa. É digitada na tela da instituição. |
+| Limite de tentativas de senha | É nosso (`limite.py`). | É do provedor. |
+| Segundo fator | Não há. | O que o provedor tiver. |
+| O que a instituição abre para o IoTEdu | A porta LDAPS do diretório e uma conta de serviço. | Um cliente registrado no provedor. O diretório não é exposto. |
+| No núcleo em nuvem | O núcleo não alcança o diretório (seção 4.5). | Funciona: o provedor é um endereço HTTPS público. |
+| Peças para operar | Nenhuma a mais. | O provedor, que é da instituição. |
+
+Limites do que foi feito:
+
+- **Quem tem conta no provedor entra aprovado naquela instituição.** Se o provedor da instituição aceita
+  cadastro livre, isso deixa de ser prova. É pergunta para fazer a cada instituição antes de ligar.
+- **O e-mail só liga o login a uma pessoa que já existe quando o provedor diz que o verificou** e ele é de
+  um domínio da instituição (`test_login_unico_email_nao_verificado_nao_assume_a_conta_de_quem_ja_existe`).
+  No Keycloak com LDAP isso depende da opção "Trust Email" do diretório.
+- **Sair do IoTEdu não encerra a sessão no provedor.** Quem clicar de novo no botão entra sem digitar a
+  senha, enquanto a sessão do provedor durar. O corte de 12 horas continua valendo do nosso lado.
+- **Um provedor só com SAML, fora da CAFe, não usa este caminho.** Ele entra pelo mesmo SP SAML da CAFe,
+  com o provedor cadastrado nele. Não foi testado.
+
 ## 5. O que foi testado
 
 Não há emulador. Os testes se dividem pelo que cada um precisa para rodar.
 
 | Grupo | Precisa de | Situação em 25/11/2026 |
 |---|---|---|
-| A. Regras, verificadores e rotas | Só do Docker. O Firebase é trocado por um substituto; o OpenLDAP é de verdade. | **100 testes, todos passando.** |
-| B. Ponta a ponta com o Firebase | Do projeto Firebase de teste, com a chave de serviço. | **9 testes e 3 conferências num navegador, todos passando.** |
+| A. Regras, verificadores e rotas | Só do Docker. O Firebase é trocado por um substituto; o OpenLDAP é de verdade. | **160 testes, todos passando.** |
+| B. Ponta a ponta com o Firebase | Do projeto Firebase de teste, com a chave de serviço. | **10 testes e 4 conferências num navegador (5 com o Keycloak de teste), todos passando.** |
 | C. Google e Microsoft na tela | Do projeto e de uma pessoa com conta em cada um. | **Microsoft com conta de diretório: aprovado. Google com conta pessoal: pendente, como esperado.** Os outros passos do roteiro ainda não foram feitos. |
 
 ### A. O que já roda: o nosso código
 
 ```
 $ docker compose run --rm testes
-........................................................................ [ 72%]
-............................                                             [100%]
-100 passed, 27 warnings in 73.45s (0:01:13)
+160 passed, 35 warnings in 127.57s (0:02:07)
 ```
 
 Nestes testes, as quatro chamadas ao Firebase (verificar o token, criar a conta, gravar os claims, emitir o
@@ -417,15 +510,17 @@ TLS. Eles provam a nossa lógica; não provam nada sobre o Firebase.
 
 | Assunto | Testes | O que fica provado |
 |---|---:|---|
-| Regra de entrada | 13 | Para cada provedor, quem entra na hora, quem fica pendente e quem é recusado. |
+| Regra de entrada | 16 | Para cada provedor, quem entra na hora, quem fica pendente e quem é recusado. |
 | Tokens do Google e da Microsoft | 10 | O verificador recusa audiência errada, assinatura de outra chave, token vencido, emissor que não bate com o diretório e token sem assinatura. |
-| Ponte da CAFe, limite, partida | 29 | O token de ponte vence, não se repete e não aceita outro segredo. O serviço não sobe sem projeto, sem chave, com o emulador configurado ou com segredo curto ou padrão. As rotas de teste só existem em localhost. |
+| Ponte da CAFe, limite, partida | 41 | O token de ponte vence, não se repete e não aceita outro segredo. O serviço não sobe sem projeto, sem chave, com o emulador configurado ou com segredo curto ou padrão. As rotas de teste só existem em localhost. |
 | Projeção | 3 | As contas de custo batem com a tabela de preços. |
 | Rotas de Google e Microsoft | 11 | Sessão por cookie, claims gravados, acesso só com o token, conta pessoal pendente, diretório estranho pendente, token do provedor forjado ou de outra conta recusado. |
-| Rotas de LDAP | 13 | Senha certa entra. Senha errada e usuário inexistente dão a mesma resposta. Injeção no filtro não passa. Sem TLS ou com outra CA a senha não é enviada. |
-| Rotas da CAFe | 7 | Do SP simulado ao painel, e as recusas da seção 4.8. |
+| Cliente do login único | 23 | O ID token do provedor é recusado com emissor, audiência ou `nonce` errados, vencido, assinado por outra chave, sem assinatura ou com segredo compartilhado. A descoberta incoerente ou insegura é recusada. |
+| Rotas de LDAP | 14 | Senha certa entra. Senha errada e usuário inexistente dão a mesma resposta. Injeção no filtro não passa. Com outra CA a conexão não é feita. O servidor de teste recusa senha fora de TLS, e o nosso lado não sobe com endereço `ldap://`. A conferência do cadastro diz em qual passo parou. |
+| Rotas da CAFe | 7 | Do token de ponte ao painel, e as recusas da seção 4.8. |
+| Rotas do login único | 20 | Do provedor simulado ao painel. Link de fora, estado trocado, volta repetida, código inventado e token com claim errado são recusados. E-mail não verificado não assume o cadastro de outra pessoa. |
 | A mesma pessoa em dois logins | 2 | E-mail provado junta os logins numa pessoa só. E-mail só afirmado não junta. |
-| Tokens que não podem valer, sessão | 12 | Login antigo, conta desconhecida e login por senha são recusados. Pedido de outra origem é recusado. Sair encerra a sessão e pede ao Firebase para invalidar a renovação. A senha não volta em mensagem de erro. |
+| Tokens que não podem valer, sessão | 13 | Login antigo, conta desconhecida e login por senha são recusados. Pedido de outra origem é recusado. Sair encerra a sessão e pede ao Firebase para invalidar a renovação. A senha não volta em mensagem de erro. |
 
 Os avisos da saída são da biblioteca `ldap3`, que usa funções antigas do Python (seção 4.7).
 
@@ -437,21 +532,24 @@ Firebase, e as trocas passam pela API pública dele, a mesma que o SDK web usa.
 
 ```
 $ docker compose run --rm testes-firebase
-.........                                                                [100%]
-9 passed in 25.79s
+..........                                                               [100%]
+10 passed in 28.01s
 
 $ docker compose run --rm navegador
 Chromium 159.0.8154.6
 PASSOU  LDAP: entra, mostra cookie e Bearer, sai
 PASSOU  LDAP: senha errada mostra o erro e não entra
 PASSOU  CAFe: popup, aviso entre janelas e troca do código
-3 de 3 passaram
+PASSOU  Login único (OIDC): popup no provedor, volta e troca do código
+PASSOU  Keycloak na frente do LDAP: senha na tela dele, mesma pessoa do LDAP
+5 de 5 passaram
 ```
 
 | Teste | O que fica provado |
 |---|---|
 | `test_ldap_de_ponta_a_ponta_com_token_assinado_pelo_firebase` | O custom token do backend é aceito, e o primeiro ID token já traz a instituição, o papel e o estado. |
-| `test_cafe_de_ponta_a_ponta_com_o_sp_simulado` | O mesmo, pelo caminho da CAFe. |
+| `test_cafe_de_ponta_a_ponta_com_o_sp_simulado` | O mesmo, pelo caminho da CAFe. O teste emite o token de ponte no lugar do SP. |
+| `test_login_unico_de_ponta_a_ponta_com_o_provedor_simulado` | O mesmo, pelo login único da instituição. |
 | `test_o_token_do_firebase_vale_sozinho_no_cabecalho` | O backend aceita o ID token real sem cookie. |
 | `test_token_com_assinatura_adulterada_e_recusado` | Token mexido não passa. |
 | `test_token_com_o_conteudo_trocado_e_recusado` | Ninguém muda a própria instituição ou papel editando o token. |
@@ -459,9 +557,9 @@ PASSOU  CAFe: popup, aviso entre janelas e troca do código
 | `test_o_firebase_recusa_custom_token_que_o_backend_nao_assinou` | Só a nossa chave emite custom token. |
 | `test_renovar_o_token_mantem_os_claims` | A renovação de hora em hora mantém a instituição. |
 | `test_depois_de_sair_o_firebase_nao_renova_mais_o_token` | Sair invalida a renovação. |
-| Navegador: LDAP, senha errada, CAFe | A página `pagina/`, com o SDK web (13.4.0), num Chromium sem tela. |
+| Navegador: LDAP, senha errada, CAFe, login único e, com o Keycloak de teste ligado, o login por ele | A página `pagina/`, com o SDK web (13.4.0), num Chromium sem tela. |
 
-As contas que esses testes criam no projeto (`ldap:...` e `cafe:...`) são apagadas no fim; o projeto ficou
+As contas que esses testes criam no projeto (`ldap:...`, `cafe:...` e `oidc:...`) são apagadas no fim; o projeto ficou
 com zero contas depois da rodada.
 
 Isso responde, com execução, três pontos que antes eram só leitura de documentação: LDAP e CAFe funcionam
@@ -483,7 +581,8 @@ contas do projeto:
   do administrador em diretório de terceiros continua sem resposta.
 - **Google, conta pessoal.** Entrou como pendente, e o painel recusou o acesso.
 
-O teste com o Google mostrou um detalhe que não estava na documentação lida: com "várias contas por
+O teste com o Google mostrou um detalhe que está na ajuda do Firebase
+([várias contas por e-mail](https://support.google.com/firebase/answer/9134820)) e tinha passado: com "várias contas por
 e-mail" ligado, o Firebase não pede o e-mail ao Google por conta própria, e o token do Google chega sem
 `email` e sem `email_verified`. A página passou a pedir o escopo `email`. Essa correção ainda não foi
 conferida com uma conta de Workspace.
@@ -508,12 +607,13 @@ instituição.
 barrado, e um e-mail pode ser ocupado por quem não é o dono (seção 4.3). Recomendação: ligar.
 
 **2. Onde roda o bind LDAP no modelo em nuvem** (seção 4.5). Depende do que as instituições aceitam abrir e
-do desenho do sistema que fica nelas. Enquanto não houver resposta, o LDAP só funciona no modelo atual.
+do desenho do sistema que fica nelas. Enquanto não houver resposta, o LDAP só funciona no modelo atual. A
+instituição que tem login único próprio não depende dessa resposta (seção 4.9).
 
 **3. Dados de login nos EUA e sem SLA.** O Firebase Authentication processa dados só nos EUA e não oferece
 escolha de região ([privacidade do Firebase](https://firebase.google.com/support/privacy)). Sem o upgrade
 não há SLA. No desenho implementado vão para o Firebase o nome de exibição e, para Google e Microsoft, o e-mail.
-Para LDAP e CAFe o e-mail fica só no nosso banco. É assunto para os encarregados de dados, que já estava
+Para LDAP, CAFe e login único o e-mail fica só no nosso banco. É assunto para os encarregados de dados, que já estava
 nas pendências.
 
 **4. Prazo para pedir login de novo.** O refresh token do Firebase não expira. Sem um corte nosso, quem
@@ -561,14 +661,14 @@ roda em produção. Os caminhos abaixo são os do `iotedu-dockerized`, iguais no
 2. **Sessão** (`app/backend/auth/dependencies.py`): a sessão guarda o e-mail, e todas as rotas partem dele.
    Passa a guardar o identificador do usuário, porque nem todo login traz um e-mail provado. São as
    funções `get_authenticated_user` e `get_effective_user_id`, mais quatro pontos que leem a sessão direto.
-3. **Rotas novas**: as de `backend/poc/app.py`. A regra (`regras.py`) e os verificadores (`provedores.py`)
-   entram como estão.
+3. **Rotas novas**: as de `backend/poc/app.py`. A regra (`regras.py`), os verificadores (`provedores.py`)
+   e o cliente do login único (`oidc_auth.py`) entram como estão.
 4. **CAFe** (`app/backend/auth/cafe_auth.py`): o `cafe_finish` é trocado pelo da prova de conceito. O SP
    Django não muda.
 5. **Google** (`app/backend/auth/google_auth.py`): sai o fluxo OAuth. Ficam as rotas de perfil.
 6. **Painel** (`app/frontend/app/login/LoginPageClient.tsx`): o SDK web do Firebase entra como dependência;
-   o popup do Google passa a ser o do Firebase; entram o botão da Microsoft e o formulário do LDAP. O
-   `pagina/app.js` desta pasta é o modelo.
+   o popup do Google passa a ser o do Firebase; entram o botão da Microsoft, o formulário do LDAP e o
+   botão do login único da instituição. O `pagina/app.js` desta pasta é o modelo.
 7. **Liga e desliga por método** (`auth/login_methods.py`, no `iotedu-stack`): hoje vale para a instalação
    inteira. Passa a valer por instituição.
 
@@ -579,7 +679,8 @@ roda em produção. Os caminhos abaixo são os do `iotedu-dockerized`, iguais no
    autorização do administrador.
 2. Levar ao grupo as decisões 1 a 4 da seção 6.
 3. Com a resposta dos líderes de implantação sobre as contas institucionais, escolher a primeira
-   instituição para o teste real de LDAP.
+   instituição para o teste real de LDAP. Perguntar também quais têm login único próprio (Keycloak, ADFS):
+   para essas, o caminho da seção 4.9 dispensa abrir o diretório.
 4. Decidir se o encaixe começa já no modelo atual (um projeto por instalação) ou espera o núcleo.
 
 ## Premissas da projeção
