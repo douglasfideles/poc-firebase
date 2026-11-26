@@ -4,13 +4,15 @@ Quatro operações: verificar o ID token, garantir a conta, gravar os claims e e
 """
 from __future__ import annotations
 
+import hashlib
+
 import firebase_admin
 from firebase_admin import auth, credentials
 
 from .config import Config
 
 # O backend só emite custom token para os logins que ele mesmo prova.
-PREFIXOS_CUSTOM = ("ldap:", "cafe:")
+PREFIXOS_CUSTOM = ("ldap:", "cafe:", "oidc:")
 TAMANHO_MAXIMO_UID = 128  # limite do Firebase
 
 
@@ -44,11 +46,23 @@ def verificar_id_token(token: str) -> dict:
     return claims
 
 
+def uid_custom(metodo: str, inst: str, sujeito: str) -> str:
+    """O uid da conta no Firebase para um login que o backend prova: `metodo:instituição:sujeito`.
+
+    O identificador que vem de fora pode ser longo demais para o Firebase; nesse caso entra o resumo.
+    """
+    sujeito = sujeito.strip()
+    uid = f"{metodo}:{inst}:{sujeito}"
+    if len(uid) > TAMANHO_MAXIMO_UID:
+        uid = f"{metodo}:{inst}:{hashlib.sha256(sujeito.encode()).hexdigest()}"
+    return uid
+
+
 def garantir_usuario(uid: str, nome: str) -> None:
     """Cria a conta no Firebase se ainda não existe.
 
-    Sem e-mail, de propósito: o e-mail de um login LDAP ou CAFe fica só no nosso banco, para o
-    Firebase não fundir essa conta com um login Google ou Microsoft do mesmo endereço.
+    Sem e-mail, de propósito: o e-mail de um login LDAP, CAFe ou do login único fica só no nosso
+    banco, para o Firebase não fundir essa conta com um login Google ou Microsoft do mesmo endereço.
     """
     try:
         atual = auth.get_user(uid, app=_app)
@@ -72,7 +86,7 @@ def emitir_custom_token(uid: str) -> str:
     Sem claims dentro dele: claims embutidos no custom token passariam por cima dos gravados.
     """
     if not uid.startswith(PREFIXOS_CUSTOM) or len(uid) > TAMANHO_MAXIMO_UID:
-        raise ValueError("custom token só para uid ldap: ou cafe:")
+        raise ValueError("custom token só para uid ldap:, cafe: ou oidc:")
     return _assinar_custom_token(uid)
 
 
@@ -87,7 +101,7 @@ def encerrar_sessoes(uid: str) -> None:
 
 
 def apagar_contas(uids: list[str]) -> None:
-    """Apaga contas criadas pelos testes. Só as que o backend criou (ldap: e cafe:)."""
+    """Apaga contas criadas pelos testes. Só as que o backend criou (ldap:, cafe: e oidc:)."""
     alvo = [u for u in uids if u.startswith(PREFIXOS_CUSTOM)]
     for i in range(0, len(alvo), 1000):
         auth.delete_users(alvo[i:i + 1000], app=_app)

@@ -146,10 +146,10 @@ class Repositorio:
             self._db.execute("UPDATE usuarios SET is_active = 0 WHERE id = ?", (usuario_id,))
 
     def uids_custom(self) -> list[str]:
-        """Contas do Firebase que o backend criou (LDAP e CAFe)."""
+        """Contas do Firebase que o backend criou (LDAP, CAFe e login único)."""
         with self._trava:
             return [l["firebase_uid"] for l in self._db.execute(
-                "SELECT firebase_uid FROM identidades WHERE provedor IN ('ldap', 'cafe')")]
+                "SELECT firebase_uid FROM identidades WHERE provedor IN ('ldap', 'cafe', 'oidc')")]
 
     def limpar(self) -> None:
         """Só para os testes."""

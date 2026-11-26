@@ -1,16 +1,21 @@
 """Rotas da prova de conceito.
 
-Quatro logins, um só resultado: uma conta no Firebase com a instituição, o papel e o estado nos
+Cinco logins, um só resultado: uma conta no Firebase com a instituição, o papel e o estado nos
 claims, e a sessão do app.
 
 - Google e Microsoft: o navegador faz o login no Firebase e manda os tokens para `/session`.
 - LDAP: o backend prova a senha e devolve um custom token.
 - CAFe: o SP SAML que já existe prova a pessoa; o backend devolve um custom token.
+- Login único da instituição (OIDC): o backend confere o token do provedor dela e devolve um
+  custom token.
+
+Tudo o que o Firebase não faz sozinho termina em `entrar_por_custom_token`.
 """
 from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import math
 import os
 import secrets
@@ -28,7 +33,7 @@ from pydantic import BaseModel, Field, SecretStr
 from starlette.middleware.sessions import SessionMiddleware
 
 from . import firebase as fb
-from . import ldap_auth, ponte_cafe
+from . import demo_oidc, ldap_auth, oidc_auth, ponte_cafe
 from .config import Config
 from .limite import Limitador
 from .provedores import PROVEDORES, TokenDeProvedorInvalido, VerificadorJWKS, VerificadorProvedor
@@ -37,7 +42,13 @@ from .repositorio import Repositorio, Usuario
 from .sessao import UsuarioAtual, exigir_ativo, exigir_login_recente, resolver
 
 ERRO_DE_SENHA = "Usuário ou senha inválidos."
+registro = logging.getLogger("poc")
 VALIDADE_ESTADO_CAFE_S = 600
+VALIDADE_ESTADO_OIDC_S = 600
+# Começar um login único não exige estar logado. Os tetos impedem que alguém encha a memória de
+# pedidos, e que um endereço sozinho ocupe o teto geral e tire o login de todo mundo.
+MAXIMO_IDAS_OIDC = 5000
+MAXIMO_IDAS_OIDC_POR_IP = 200
 VALIDADE_TROCA_S = 60
 
 
@@ -60,11 +71,17 @@ def criar_app(cfg: Config, web_dir: str | Path | None = None,
     limite_usuario = Limitador(livres=3)
     limite_ip = Limitador(livres=20)
     assinador = URLSafeTimedSerializer(cfg.sessao_segredo, salt="cafe-estado")
+    assinador_oidc = URLSafeTimedSerializer(cfg.sessao_segredo, salt="oidc-estado")
+    cliente_oidc = oidc_auth.ClienteOidc()
+    retorno_oidc = f"{cfg.origem_front}/api/auth/oidc/callback"
     trocas: dict[str, tuple[str, float]] = {}  # hash do código -> (uid, expira)
+    # Logins únicos em andamento: hash do estado -> (instituição, nonce, verificador PKCE, expira, IP).
+    idas_oidc: dict[str, tuple[str, str, str, float, str]] = {}
     trava_trocas = threading.Lock()
     https = cfg.origem_front.startswith("https://")
 
     app = FastAPI(title="IoTEdu · PoC de login com Firebase", docs_url=None, redoc_url=None)
+    app.state.oidc = cliente_oidc  # os testes trocam o cliente HTTP dele
     app.add_middleware(
         SessionMiddleware,
         secret_key=cfg.sessao_segredo,
@@ -117,7 +134,7 @@ def criar_app(cfg: Config, web_dir: str | Path | None = None,
                 "email": usuario.email}
 
     def entrar_por_custom_token(prova: ProvaLogin, uid: str) -> str:
-        """LDAP e CAFe: decide, grava a pessoa e os claims, e só então emite o custom token."""
+        """LDAP, CAFe e login único: decide, grava a pessoa e os claims; o custom token sai depois."""
         decisao = decidir(prova, cfg.instituicoes)
         if decisao.estado == RECUSADO:
             raise HTTPException(status_code=403, detail=decisao.motivo)
@@ -140,6 +157,7 @@ def criar_app(cfg: Config, web_dir: str | Path | None = None,
             "instituicoes": [
                 {"slug": i.slug, "nome": i.nome, "metodos": list(i.metodos),
                  "googleHd": i.google_hd[0] if i.google_hd else None,
+                 "oidcRotulo": i.oidc.rotulo if i.oidc and "oidc" in i.metodos else None,
                  "microsoftTenant": cfg.ms_tenant if cfg.ms_tenant in i.microsoft_tid else None}
                 for i in cfg.instituicoes.values()
             ],
@@ -163,7 +181,7 @@ def criar_app(cfg: Config, web_dir: str | Path | None = None,
         provedor_fb = info.get("sign_in_provider")
 
         if provedor_fb == "custom":
-            # LDAP e CAFe: a pessoa já foi decidida e gravada quando o custom token saiu.
+            # LDAP, CAFe e login único: a pessoa já foi decidida e gravada antes do custom token.
             usuario = repo.por_firebase_uid(uid)
             if usuario is None or not uid.startswith(fb.PREFIXOS_CUSTOM):
                 raise HTTPException(status_code=401, detail="Conta desconhecida.")
@@ -236,7 +254,7 @@ def criar_app(cfg: Config, web_dir: str | Path | None = None,
         uid = entrar_por_custom_token(prova, f"ldap:{inst.slug}:{uid_ldap}")
         return JSONResponse({"custom_token": fb.emitir_custom_token(uid)})
 
-    # ------------------------------------------------------------------ CAFe
+    # ------------------------------------------------------------------ janela de login (CAFe e OIDC)
     def pagina_popup(tipo: str, status: int = 200) -> HTMLResponse:
         # Nada sensível na mensagem, e só para a origem do painel (nunca "*").
         alvo = json.dumps(cfg.origem_front).replace("</", "<\\/")
@@ -246,6 +264,32 @@ def criar_app(cfg: Config, web_dir: str | Path | None = None,
                 "window.close();</script>")
         return HTMLResponse(html, status_code=status)
 
+    def guardar_troca(r: Response, metodo: str, uid: str) -> None:
+        """O custom token não vai pela janela: fica um código de uso único num cookie HttpOnly."""
+        codigo = secrets.token_urlsafe(32)
+        with trava_trocas:
+            agora = time.time()
+            for k in [k for k, (_, exp) in trocas.items() if exp < agora]:
+                del trocas[k]
+            trocas[hashlib.sha256(f"{metodo}:{codigo}".encode()).hexdigest()] = (
+                uid, agora + VALIDADE_TROCA_S)
+        r.set_cookie(f"{metodo}_troca", codigo, max_age=VALIDADE_TROCA_S, httponly=True,
+                     samesite="strict", secure=https, path=f"/api/auth/{metodo}")
+
+    def resgatar_troca(request: Request, metodo: str) -> Response:
+        """A janela principal troca o código (cookie) pelo custom token. Vale uma vez."""
+        conferir_origem(request)
+        codigo = request.cookies.get(f"{metodo}_troca", "")
+        with trava_trocas:
+            uid, expira = trocas.pop(
+                hashlib.sha256(f"{metodo}:{codigo}".encode()).hexdigest(), ("", 0.0))
+        if not uid or expira < time.time():
+            raise HTTPException(status_code=401, detail="Login não concluído.")
+        r = JSONResponse({"custom_token": fb.emitir_custom_token(uid)})
+        r.delete_cookie(f"{metodo}_troca", path=f"/api/auth/{metodo}")
+        return r
+
+    # ------------------------------------------------------------------ CAFe
     @app.get("/api/auth/cafe/login")
     def cafe_login() -> Response:
         """Abre no popup. Marca o navegador que começou o login e manda para o SP."""
@@ -283,31 +327,102 @@ def criar_app(cfg: Config, web_dir: str | Path | None = None,
             r.delete_cookie("cafe_estado", path="/api/auth/cafe")
             return r
 
-        # O custom token não vai pela janela: fica um código de uso único num cookie HttpOnly.
-        codigo = secrets.token_urlsafe(32)
-        with trava_trocas:
-            agora = time.time()
-            for k in [k for k, (_, exp) in trocas.items() if exp < agora]:
-                del trocas[k]
-            trocas[hashlib.sha256(codigo.encode()).hexdigest()] = (uid, agora + VALIDADE_TROCA_S)
         r = pagina_popup("cafe-ok")
         r.delete_cookie("cafe_estado", path="/api/auth/cafe")
-        r.set_cookie("cafe_troca", codigo, max_age=VALIDADE_TROCA_S, httponly=True,
-                     samesite="strict", secure=https, path="/api/auth/cafe")
+        guardar_troca(r, "cafe", uid)
         return r
 
     @app.post("/api/auth/cafe/token")
     def cafe_token(request: Request) -> Response:
-        """A janela principal troca o código (cookie) pelo custom token. Vale uma vez."""
-        conferir_origem(request)
-        codigo = request.cookies.get("cafe_troca", "")
-        with trava_trocas:
-            uid, expira = trocas.pop(hashlib.sha256(codigo.encode()).hexdigest(), ("", 0.0))
-        if not uid or expira < time.time():
-            raise HTTPException(status_code=401, detail="Login pela CAFe não concluído.")
-        r = JSONResponse({"custom_token": fb.emitir_custom_token(uid)})
-        r.delete_cookie("cafe_troca", path="/api/auth/cafe")
+        return resgatar_troca(request, "cafe")
+
+    # ------------------------------------------------------------------ login único da instituição (OIDC)
+    def erro_oidc(status: int) -> HTMLResponse:
+        r = pagina_popup("oidc-erro", status)
+        r.delete_cookie("oidc_estado", path="/api/auth/oidc")
         return r
+
+    @app.get("/api/auth/oidc/login")
+    def oidc_login(request: Request, inst: str = "") -> Response:
+        """Abre no popup. Leva a pessoa à tela de login da própria instituição."""
+        i = cfg.instituicoes.get(inst)
+        if i is None or i.oidc is None or "oidc" not in i.metodos:
+            raise HTTPException(status_code=400, detail="Instituição sem login único.")
+        estado, nonce = secrets.token_urlsafe(24), secrets.token_urlsafe(24)
+        verificador, desafio = oidc_auth.novo_par_pkce()
+        try:
+            destino = cliente_oidc.endereco_de_login(i.oidc, retorno_oidc, estado, nonce, desafio)
+        except oidc_auth.OidcIndisponivel as e:
+            registro.warning("login único de %s: provedor indisponível (%s)", i.slug, e)
+            return pagina_popup("oidc-erro", 503)
+        # O nonce e o verificador ficam no servidor. O navegador só leva o estado, assinado.
+        with trava_trocas:
+            agora = time.time()
+            for k in [k for k, v in idas_oidc.items() if v[3] < agora]:
+                del idas_oidc[k]
+            ip = request.client.host if request.client else "?"
+            cheio = (len(idas_oidc) >= MAXIMO_IDAS_OIDC
+                     or sum(1 for v in idas_oidc.values() if v[4] == ip) >= MAXIMO_IDAS_OIDC_POR_IP)
+            if not cheio:
+                idas_oidc[hashlib.sha256(estado.encode()).hexdigest()] = (
+                    i.slug, nonce, verificador, agora + VALIDADE_ESTADO_OIDC_S, ip)
+        if cheio:
+            registro.warning("login único: logins em andamento demais; pedido recusado")
+            return pagina_popup("oidc-erro", 503)
+        r = RedirectResponse(destino, status_code=303)
+        r.set_cookie("oidc_estado", assinador_oidc.dumps(estado), max_age=VALIDADE_ESTADO_OIDC_S,
+                     httponly=True, samesite="lax", secure=https, path="/api/auth/oidc")
+        return r
+
+    @app.get("/api/auth/oidc/callback")
+    def oidc_callback(request: Request, code: str = "", state: str = "") -> Response:
+        """A volta do provedor: confere o estado, troca o código e confere o ID token."""
+        try:
+            estado = assinador_oidc.loads(request.cookies.get("oidc_estado", ""),
+                                          max_age=VALIDADE_ESTADO_OIDC_S)
+        except BadSignature:
+            # Ninguém neste navegador começou um login: o link veio de fora.
+            return pagina_popup("oidc-erro", 400)
+        # Cada login em andamento só conclui uma vez, dê certo ou não (a pessoa pode ter desistido
+        # na tela do provedor, e aí a volta vem sem código).
+        with trava_trocas:
+            slug, nonce, verificador, expira, _ = idas_oidc.pop(
+                hashlib.sha256(str(estado).encode()).hexdigest(), ("", "", "", 0.0, ""))
+        if not code or not state or not secrets.compare_digest(str(estado).encode(), state.encode()):
+            return erro_oidc(400)
+        i = cfg.instituicoes.get(slug)
+        if i is None or i.oidc is None or expira < time.time():
+            return erro_oidc(400)
+
+        try:
+            attrs = cliente_oidc.concluir(i.oidc, retorno_oidc, code, verificador, nonce,
+                                          os.environ.get(i.oidc.segredo_env, "")
+                                          if i.oidc.segredo_env else "")
+        except oidc_auth.OidcIndisponivel as e:
+            registro.warning("login único de %s: provedor indisponível (%s)", i.slug, e)
+            return erro_oidc(503)
+        except oidc_auth.OidcInvalido as e:
+            # O motivo fica no registro, para quem liga uma instituição; a pessoa só vê que não entrou.
+            registro.warning("login único de %s recusado: %s", i.slug, e)
+            return erro_oidc(401)
+
+        # A instituição é a do login que este navegador começou, e o token tem de vir assinado pelo
+        # provedor cadastrado para ela. Dois cadastros com o mesmo provedor são recusados na partida.
+        prova = ProvaLogin(provedor="oidc", sujeito=f"{i.slug}:{attrs.sujeito}", nome=attrs.nome,
+                           email=attrs.email, email_verificado=attrs.email_verificado,
+                           inst_oidc=i.slug)
+        try:
+            uid = entrar_por_custom_token(prova, fb.uid_custom("oidc", i.slug, attrs.sujeito))
+        except HTTPException:
+            return erro_oidc(403)
+        r = pagina_popup("oidc-ok")
+        r.delete_cookie("oidc_estado", path="/api/auth/oidc")
+        guardar_troca(r, "oidc", uid)
+        return r
+
+    @app.post("/api/auth/oidc/token")
+    def oidc_token(request: Request) -> Response:
+        return resgatar_troca(request, "oidc")
 
     # ------------------------------------------------------------------ sessão
     @app.post("/api/auth/logout")
@@ -333,6 +448,9 @@ def criar_app(cfg: Config, web_dir: str | Path | None = None,
 
     # ------------------------------------------------------------------ só no ambiente de teste
     if cfg.ambiente_de_teste:
+        sso_simulado = demo_oidc.instalar(app, cfg)
+        app.state.sso_simulado = sso_simulado
+
         @app.get("/demo/cafe/sp", response_class=HTMLResponse)
         def demo_sp() -> str:
             """Faz o papel do SP SAML e do IdP da CAFe. Só existe com AMBIENTE_DE_TESTE=1."""
@@ -356,13 +474,19 @@ def criar_app(cfg: Config, web_dir: str | Path | None = None,
             return RedirectResponse(f"/api/auth/cafe/finish?token={token}", status_code=303)
 
         @app.post("/demo/reset")
-        def demo_reset() -> dict:
+        def demo_reset(request: Request) -> dict:
+            # Uma página qualquer aberta no navegador de quem testa não pode apagar os dados.
+            origem = request.headers.get("origin")
+            if origem and origem.rstrip("/") != cfg.origem_front:
+                raise HTTPException(status_code=403, detail="Origem não aceita.")
             fb.apagar_contas(repo.uids_custom())  # as contas de teste criadas no projeto
             repo.limpar()
             limite_usuario.limpar()
             limite_ip.limpar()
             with trava_trocas:
                 trocas.clear()
+                idas_oidc.clear()
+            sso_simulado.limpar()
             return {"ok": True}
 
     if web_dir and Path(web_dir).is_dir():

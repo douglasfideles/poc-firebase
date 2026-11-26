@@ -23,10 +23,30 @@ SEGREDOS_PROIBIDOS = {
     "troque-este-segredo",
 }
 TAMANHO_MINIMO_SEGREDO = 32
+# O login único simulado do ambiente de teste (ver `demo_oidc.py`).
+EMISSOR_SIMULADO = "simulado"  # o que se escreve no cadastro para usá-lo
+CAMINHO_OIDC_SIMULADO = "/demo/oidc"
+CLIENTE_OIDC_SIMULADO = "iotedu-poc"
 
 
 class ErroDeConfig(RuntimeError):
     """A configuração é insegura ou incoerente; o serviço não deve subir."""
+
+
+# O que muda de um diretório para outro é o filtro e o nome dos atributos. `tipo` escolhe o padrão;
+# qualquer campo escrito no cadastro vale mais que o padrão.
+TIPOS_LDAP = {
+    "openldap": {
+        "filtro": "(&(objectClass=inetOrgPerson)(uid={usuario}))",
+        "attr_uid": "uid", "attr_mail": "mail", "attr_nome": "cn",
+    },
+    # Active Directory: a pessoa digita o nome de logon; conta desativada não é achada.
+    "ad": {
+        "filtro": ("(&(objectCategory=person)(objectClass=user)(sAMAccountName={usuario})"
+                   "(!(userAccountControl:1.2.840.113556.1.4.803:=2)))"),
+        "attr_uid": "sAMAccountName", "attr_mail": "mail", "attr_nome": "displayName",
+    },
+}
 
 
 @dataclass(frozen=True)
@@ -40,6 +60,17 @@ class LdapCfg:
     attr_uid: str = "uid"
     attr_mail: str = "mail"
     attr_nome: str = "cn"
+    tipo: str = "openldap"
+
+
+@dataclass(frozen=True)
+class OidcCfg:
+    """O login único da própria instituição (Keycloak, ADFS, Shibboleth com OIDC e parecidos)."""
+    emissor: str  # o `issuer`; a descoberta fica em <emissor>/.well-known/openid-configuration
+    client_id: str
+    segredo_env: str = ""  # vazio: cliente público, só com PKCE
+    escopos: str = "openid email profile"
+    rotulo: str = "Login da instituição"
 
 
 @dataclass(frozen=True)
@@ -52,6 +83,7 @@ class Instituicao:
     microsoft_tid: tuple[str, ...] = ()
     cafe_escopos: tuple[str, ...] = ()
     ldap: LdapCfg | None = None
+    oidc: OidcCfg | None = None
 
 
 @dataclass(frozen=True)
@@ -82,8 +114,9 @@ def carregar_instituicoes(caminho: str | Path,
                           env: Mapping[str, str] | None = None) -> dict[str, Instituicao]:
     """Lê o cadastro. Um item escrito como `${NOME}` vem da variável de ambiente NOME.
 
-    Serve para os identificadores reais de quem testa (diretório Microsoft, domínio do Workspace)
-    ficarem no `.env`, fora do git. Variável vazia ou ausente: o item some da lista.
+    Serve para os identificadores reais de quem testa (diretório Microsoft, domínio do Workspace,
+    endereço do login único) ficarem no `.env`, fora do git. Variável vazia ou ausente: o item
+    some da lista.
     """
     env = os.environ if env is None else env
 
@@ -98,22 +131,44 @@ def carregar_instituicoes(caminho: str | Path,
                 itens.append(v.lower())
         return tuple(itens)
 
+    def _texto(valor, padrao: str = "") -> str:
+        v = str(valor if valor is not None else "").strip()
+        m = _VARIAVEL.match(v)
+        if m:
+            v = (env.get(m.group(1)) or "").strip()
+        return v or padrao
+
     bruto = yaml.safe_load(Path(caminho).read_text(encoding="utf-8")) or {}
     saida: dict[str, Instituicao] = {}
     for slug, d in (bruto.get("instituicoes") or {}).items():
         ldap = None
         if d.get("ldap"):
             l = d["ldap"]
+            tipo = str(l.get("tipo", "openldap")).strip().lower()
+            if tipo not in TIPOS_LDAP:
+                raise ErroDeConfig(f"{slug}: tipo de LDAP desconhecido ({tipo}). Use openldap ou ad.")
+            padrao = TIPOS_LDAP[tipo]
             ldap = LdapCfg(
                 url=l["url"],
                 base=l["base"],
-                filtro=l["filtro"],
+                filtro=l.get("filtro", padrao["filtro"]),
                 bind_dn=l["bind_dn"],
                 senha_env=l["senha_env"],
                 ca=l["ca"],
-                attr_uid=l.get("attr_uid", "uid"),
-                attr_mail=l.get("attr_mail", "mail"),
-                attr_nome=l.get("attr_nome", "cn"),
+                attr_uid=l.get("attr_uid", padrao["attr_uid"]),
+                attr_mail=l.get("attr_mail", padrao["attr_mail"]),
+                attr_nome=l.get("attr_nome", padrao["attr_nome"]),
+                tipo=tipo,
+            )
+        oidc = None
+        if d.get("oidc"):
+            o = d["oidc"]
+            oidc = OidcCfg(
+                emissor=_texto(o.get("emissor")).rstrip("/"),
+                client_id=_texto(o.get("client_id")),
+                segredo_env=_texto(o.get("segredo_env")),
+                escopos=_texto(o.get("escopos"), "openid email profile"),
+                rotulo=_texto(o.get("rotulo"), "Login da instituição"),
             )
         saida[slug] = Instituicao(
             slug=slug,
@@ -124,6 +179,7 @@ def carregar_instituicoes(caminho: str | Path,
             microsoft_tid=_tupla(d.get("microsoft_tid")),
             cafe_escopos=_tupla(d.get("cafe_escopos")),
             ldap=ldap,
+            oidc=oidc,
         )
     return saida
 
@@ -147,12 +203,28 @@ def carregar(env: Mapping[str, str] | None = None) -> Config:
             insts = {k: replace(i, metodos=tuple(m for m in i.metodos if m != metodo))
                      for k, i in insts.items()}
 
+    origem = env.get("ORIGEM_FRONT", "http://localhost:8088").rstrip("/")
+    de_teste = (env.get("AMBIENTE_DE_TESTE") or "").strip() == "1"
+    for slug, i in list(insts.items()):
+        if "oidc" not in i.metodos or i.oidc is None:
+            continue
+        if i.oidc.emissor == EMISSOR_SIMULADO and de_teste:
+            insts[slug] = replace(i, oidc=replace(
+                i.oidc, emissor=f"{origem}{CAMINHO_OIDC_SIMULADO}", client_id=CLIENTE_OIDC_SIMULADO,
+                segredo_env=""))
+        elif i.oidc.emissor == EMISSOR_SIMULADO:
+            avisos.append(f"{slug}: o login único simulado só existe no ambiente de teste: desligado.")
+            insts[slug] = replace(i, metodos=tuple(m for m in i.metodos if m != "oidc"))
+        elif not i.oidc.emissor:
+            # O emissor vem de uma variável que está vazia: a instituição fica sem este login.
+            insts[slug] = replace(i, metodos=tuple(m for m in i.metodos if m != "oidc"))
+
     cfg = Config(
         projeto=(env.get("FIREBASE_PROJECT_ID") or "").strip(),
         credencial=(env.get("GOOGLE_APPLICATION_CREDENTIALS") or "").strip(),
         sessao_segredo=env.get("SESSAO_SEGREDO", ""),
         ponte_segredo=env.get("CAFE_PONTE_SEGREDO", ""),
-        origem_front=env.get("ORIGEM_FRONT", "http://localhost:8088").rstrip("/"),
+        origem_front=origem,
         max_idade_login_h=float(env.get("MAX_IDADE_LOGIN_H", "12")),
         db_caminho=env.get("DB_CAMINHO", "/dados/poc.sqlite3"),
         google_client_id=google,
@@ -161,7 +233,7 @@ def carregar(env: Mapping[str, str] | None = None) -> Config:
         web_api_key=(env.get("FIREBASE_WEB_API_KEY") or "").strip(),
         auth_domain=(env.get("FIREBASE_AUTH_DOMAIN") or "").strip(),
         cafe_sp_login_url=(env.get("CAFE_SP_LOGIN_URL") or "").strip() or None,
-        ambiente_de_teste=(env.get("AMBIENTE_DE_TESTE") or "").strip() == "1",
+        ambiente_de_teste=de_teste,
         instituicoes=insts,
         avisos=tuple(avisos),
     )
@@ -198,9 +270,32 @@ def validar(cfg: Config) -> None:
     if cfg.ambiente_de_teste and urlsplit(cfg.origem_front).hostname not in ("localhost", "127.0.0.1"):
         raise ErroDeConfig("AMBIENTE_DE_TESTE=1 só é aceito com o painel em localhost.")
 
+    provedores_oidc: dict[str, str] = {}
     for inst in cfg.instituicoes.values():
         if "ldap" in inst.metodos:
             if inst.ldap is None:
                 raise ErroDeConfig(f"{inst.slug}: método ldap ligado sem bloco ldap.")
             if not inst.ldap.url.lower().startswith("ldaps://"):
                 raise ErroDeConfig(f"{inst.slug}: o LDAP precisa ser ldaps://.")
+            if "{usuario}" not in inst.ldap.filtro:
+                raise ErroDeConfig(f"{inst.slug}: o filtro do LDAP precisa conter {{usuario}}.")
+        if "oidc" in inst.metodos:
+            if inst.oidc is None:
+                raise ErroDeConfig(f"{inst.slug}: método oidc ligado sem bloco oidc.")
+            if not inst.oidc.client_id or "openid" not in inst.oidc.escopos.split():
+                raise ErroDeConfig(f"{inst.slug}: o bloco oidc precisa de client_id e do escopo openid.")
+            if not endereco_seguro(inst.oidc.emissor, cfg.ambiente_de_teste):
+                raise ErroDeConfig(f"{inst.slug}: o emissor do oidc precisa ser https://.")
+            # O token só prova o provedor. Com o mesmo provedor em duas instituições, a pessoa
+            # escolheria em qual delas entra aprovada.
+            outra = provedores_oidc.setdefault(inst.oidc.emissor, inst.slug)
+            if outra != inst.slug:
+                raise ErroDeConfig(f"{inst.slug}: o emissor do oidc já é o de {outra}.")
+
+
+def endereco_seguro(endereco: str, ambiente_de_teste: bool) -> bool:
+    """https sempre. http só no ambiente de teste, que só existe na própria máquina."""
+    partes = urlsplit(endereco)
+    if not partes.hostname:
+        return False
+    return partes.scheme == "https" or (ambiente_de_teste and partes.scheme == "http")

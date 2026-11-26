@@ -7,6 +7,7 @@ Sem I/O. É a decisão D33 do resumo de decisões, com uma prova diferente para 
   pode afirmar qualquer e-mail.
 - LDAP: o bind deu certo no diretório cadastrado para aquela instituição.
 - CAFe: o escopo do eduPersonPrincipalName (o que vem depois do @).
+- Login único da instituição (OIDC): o token veio assinado pelo emissor cadastrado para ela.
 """
 from __future__ import annotations
 
@@ -25,7 +26,7 @@ TID_CONTA_PESSOAL = "9188040d-6c67-4c5b-b112-36a304b66dad"
 
 @dataclass(frozen=True)
 class ProvaLogin:
-    provedor: str  # google | microsoft | ldap | cafe
+    provedor: str  # google | microsoft | ldap | cafe | oidc
     sujeito: str  # identificador estável dentro do provedor
     nome: str = ""
     email: str | None = None
@@ -34,6 +35,7 @@ class ProvaLogin:
     tid: str | None = None
     inst_ldap: str | None = None
     eppn: str | None = None
+    inst_oidc: str | None = None
 
 
 @dataclass(frozen=True)
@@ -106,5 +108,15 @@ def decidir(prova: ProvaLogin, insts: Mapping[str, Instituicao]) -> Decisao:
             return Decisao(RECUSADO, inst.slug, "login pela CAFe desligado para a instituição")
         return Decisao(ATIVO, inst.slug, "escopo da CAFe confere",
                        _email_da_instituicao(prova.email, inst))
+
+    if p == "oidc":
+        inst = insts.get(prova.inst_oidc or "")
+        if inst is None or inst.oidc is None or "oidc" not in inst.metodos:
+            return Decisao(RECUSADO, None, "instituição sem login único")
+        # O provedor é da instituição, mas pode deixar a pessoa digitar o próprio e-mail.
+        # Só o e-mail que ele diz ter verificado liga este login a uma pessoa que já existe.
+        email = prova.email if prova.email_verificado else None
+        return Decisao(ATIVO, inst.slug, "login único da instituição",
+                       _email_da_instituicao(email, inst))
 
     return Decisao(RECUSADO, None, "provedor não aceito")

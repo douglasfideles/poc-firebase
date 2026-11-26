@@ -2,14 +2,20 @@
 # No app, isto vira campos da instituição no banco, mantidos pela equipe IoTEdu e pelo gestor de rede.
 #
 #   dominios       domínios de e-mail que a instituição aceita como dela
-#   metodos        logins ligados para a instituição: google, microsoft, ldap, cafe
+#   metodos        logins ligados para a instituição: google, microsoft, ldap, cafe, oidc
 #   google_hd      domínios do Google Workspace (claim `hd` do ID token do Google)
 #   microsoft_tid  diretórios do Entra ID (claim `tid` do ID token da Microsoft)
 #   cafe_escopos   escopos do eduPersonPrincipalName (o que vem depois do @)
-#   ldap           diretório da instituição; a senha da conta de serviço vem de variável de ambiente
+#   ldap           diretório da instituição; a senha da conta de serviço vem de variável de ambiente.
+#                  `tipo: openldap` (padrão) ou `tipo: ad` escolhe o filtro e os atributos; `filtro`,
+#                  `attr_uid`, `attr_mail` e `attr_nome`, se escritos, valem mais que o padrão do tipo
+#   oidc           login único da própria instituição (Keycloak, ADFS, Shibboleth com OIDC...):
+#                  `emissor`, `client_id` e, se o cliente tiver segredo, `segredo_env`.
+#                  `emissor: simulado` usa o provedor de mentira do ambiente de teste
 #
 # Um item escrito como "${NOME}" vem da variável NOME do .env. É assim que entram os identificadores
-# reais de quem testa (GOOGLE_HD e MS_TENANT_ID), sem irem para o git. Variável vazia: o item some.
+# reais de quem testa (GOOGLE_HD, MS_TENANT_ID, OIDC_EMISSOR), sem irem para o git. Variável vazia: o
+# item some.
 instituicoes:
   unia:
     nome: Universidade A
@@ -23,7 +29,7 @@ instituicoes:
   unib:
     nome: Universidade B
     dominios: [unib.test]
-    metodos: [ldap]
+    metodos: [ldap, oidc]
     ldap:
       url: ldaps://ldap:636
       base: ou=pessoas,dc=unib,dc=test
@@ -31,6 +37,14 @@ instituicoes:
       bind_dn: cn=leitor,ou=servicos,dc=unib,dc=test
       senha_env: LDAP_UNIB_SENHA
       ca: /certs-pub/ca.crt
+    # O mesmo diretório, atrás de um Keycloak de verdade (docker compose --profile sso). A senha é
+    # digitada na tela do Keycloak e não passa pelo backend. Com OIDC_EMISSOR vazio no .env, este
+    # login fica desligado.
+    oidc:
+      rotulo: Login único da Universidade B (Keycloak)
+      emissor: "${OIDC_EMISSOR}"
+      client_id: "${OIDC_CLIENT_ID}"
+      segredo_env: OIDC_SEGREDO
 
   # Tem domínio no Google, mas o login com Google está desligado: só entra pela CAFe.
   unic:
@@ -39,3 +53,12 @@ instituicoes:
     metodos: [cafe]
     google_hd: [unic.test]
     cafe_escopos: [unic.test]
+
+  # Só tem login único próprio. Aqui o provedor é o simulado do ambiente de teste.
+  unid:
+    nome: Universidade D
+    dominios: [unid.test]
+    metodos: [oidc]
+    oidc:
+      rotulo: Login único da Universidade D
+      emissor: simulado
