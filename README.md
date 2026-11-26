@@ -1,7 +1,7 @@
 # poc-firebase
 
-Prova de conceito do login do IoTEdu pelo **Firebase Authentication**, com os quatro tipos de conta que as
-instituições usam: Google, Microsoft, LDAP e CAFe.
+Prova de conceito do login do IoTEdu pelo **Firebase Authentication**, com os tipos de conta que as
+instituições usam: Google, Microsoft, LDAP, CAFe e o login único próprio de uma instituição (OIDC).
 
 Ela existe para testar a decisão "autenticação 100% via Firebase" antes de mexer no sistema. Roda contra um
 projeto Firebase de verdade, sem emulador, e não depende do código do IoTEdu.
@@ -13,18 +13,21 @@ A análise completa, com custos, limites e as respostas às perguntas da reuniã
 
 | O quê | Como | Resultado |
 |---|---|---|
-| A lógica do backend (regras, rotas, banco, LDAP) | 100 testes automáticos | Todos passam |
-| Tokens emitidos e assinados pelo Firebase | 9 testes de ponta a ponta contra o projeto real | Todos passam |
-| A página, com o SDK web do Firebase | 3 conferências num Chromium sem tela | Todas passam |
+| A lógica do backend (regras, rotas, banco, LDAP, login único) | 160 testes automáticos | Todos passam |
+| Tokens emitidos e assinados pelo Firebase | 10 testes de ponta a ponta contra o projeto real | Todos passam |
+| A página, com o SDK web do Firebase | 4 conferências num Chromium sem tela; 5 com o Keycloak de teste | Todas passam |
+| Login único por um Keycloak de verdade, lendo o OpenLDAP de teste | Num Chromium sem tela | Entrou; é a mesma pessoa do login por LDAP |
 | Login com Microsoft, conta de um diretório do Entra ID | Feito à mão, na página | Entrou aprovado |
 | Login com Google, conta pessoal | Feito à mão, na página | Ficou pendente, como deve |
 
-Ainda não testado: Google com conta de Workspace de uma instituição, a CAFe real e o LDAP de uma
-instituição.
+Ainda não testado: Google com conta de Workspace de uma instituição, a CAFe real, o LDAP e o login único
+de uma instituição, e o Active Directory.
+
+O resumo das respostas à reunião de 25/11 está em [RELATORIO-FIREBASE.md](RELATORIO-FIREBASE.md).
 
 ## Como funciona
 
-O Firebase vira o lugar único onde ficam as contas e de onde saem os tokens. Os quatro logins terminam
+O Firebase vira o lugar único onde ficam as contas e de onde saem os tokens. Todos os logins terminam
 igual: uma conta no Firebase com três informações gravadas por nós (os *claims*) e a sessão do sistema.
 
 | Claim | O que guarda | Exemplo |
@@ -33,7 +36,7 @@ igual: uma conta no Firebase com três informações gravadas por nós (os *clai
 | `papel` | O papel dela | `USER` |
 | `estado` | Se a entrada foi aprovada | `ativo` ou `pendente` |
 
-### Os quatro caminhos
+### Os cinco caminhos
 
 ```
 Google, Microsoft   1. A página abre a janela de login do Firebase.
@@ -50,12 +53,35 @@ CAFe                1. Uma janela leva a pessoa ao login da universidade dela (S
                     2. O SP SAML do IoTEdu confirma quem é e avisa o backend com um token de 120 segundos.
                     3. O backend cria a conta, grava os claims e guarda um código de uso único.
                     4. A página troca o código por um custom token, e o custom token por uma sessão.
+
+Login único da      1. Uma janela leva a pessoa à tela de login da própria instituição (OIDC).
+instituição         2. A instituição devolve um código ao backend, que o troca por um token assinado por ela.
+                    3. O backend confere o token, cria a conta, grava os claims e guarda um código de uso único.
+                    4. A página troca o código por um custom token, e o custom token por uma sessão.
 ```
 
 O Firebase faz Google e Microsoft sozinho. Ele **não** fala LDAP nem aceita uma federação SAML como a
-CAFe. Nesses dois casos quem prova quem é a pessoa é o nosso backend, e o Firebase só recebe o resultado.
-É para isso que serve o *custom token*: um token que o backend assina com a chave do projeto e que o
-Firebase troca por uma sessão.
+CAFe, e só fala OIDC genérico na versão paga por usuário. Nesses três casos quem prova quem é a pessoa é
+o nosso backend, e o Firebase só recebe o resultado. É para isso que serve o *custom token*: um token que
+o backend assina com a chave do projeto e que o Firebase troca por uma sessão.
+
+No código, os três terminam na mesma função, `entrar_por_custom_token`, em `backend/poc/app.py`. Um
+login novo desse tipo é um arquivo que prova a pessoa, uma regra em `regras.py` e uma rota.
+
+### E se a instituição usa outra coisa?
+
+| O que a instituição tem | Caminho | Na prova |
+|---|---|---|
+| Google Workspace | Google, pelo Firebase | Feito |
+| Microsoft 365 ou Entra ID | Microsoft, pelo Firebase | Feito |
+| OpenLDAP | LDAP | Feito, contra um OpenLDAP de teste |
+| Active Directory | LDAP, com `tipo: ad` no cadastro. Se o diretório estiver sincronizado com o Entra ID, o login da Microsoft também serve. | Só o cadastro. Não foi testado contra um AD. |
+| Keycloak, ADFS, Shibboleth com OIDC ou outro login único | Login único da instituição (OIDC) | Feito, contra um provedor simulado e contra um Keycloak de teste |
+| CAFe | SP SAML do IoTEdu e a ponte | A ponte, com uma universidade simulada |
+| Login único só com SAML, fora da CAFe | O mesmo SP SAML da CAFe, com o provedor da instituição cadastrado nele | Não foi testado |
+
+Com Keycloak na frente do LDAP, a senha deixa de passar pelo nosso backend: ela é digitada na tela da
+instituição. É a diferença prática entre os caminhos LDAP e login único.
 
 ### Quem entra na hora e quem espera
 
@@ -68,6 +94,7 @@ Entra na hora quem prova, pelo próprio login, que é de uma instituição cadas
 | Microsoft | O diretório do Entra ID da conta (campo `tid` do token da Microsoft) |
 | LDAP | A senha conferiu no diretório cadastrado para aquela instituição |
 | CAFe | A universidade que autenticou (o que vem depois do `@` no identificador da pessoa) |
+| Login único | O token veio assinado pelo provedor cadastrado para aquela instituição |
 
 Exemplos: uma conta Gmail pessoal entra como pendente. Uma conta Microsoft de outro diretório, mesmo com
 e-mail da universidade, também. A regra está em `backend/poc/regras.py`, e as instituições em
@@ -115,6 +142,7 @@ O script cria o `.env`, gera os segredos locais e diz o que falta. Preencha no `
 | `MS_CLIENT_ID` | ID do aplicativo no Entra ID (passo 3). Sem ele o login com Microsoft fica desligado. |
 | `MS_TENANT_ID` | ID do diretório do Entra ID cujas contas entram aprovadas na Universidade A (passo 3). |
 | `CAFE_SP_LOGIN_URL` | Endereço do SP SAML de verdade. Vazio, a prova usa uma universidade simulada. |
+| `OIDC_EMISSOR`, `OIDC_CLIENT_ID` | Opcional. O login único da Universidade B (passo 4). Vazio, fica desligado. |
 
 ## Passo 3 (opcional): ligar a Microsoft
 
@@ -132,22 +160,42 @@ O script cria o `.env`, gera os segredos locais e diz o que falta. Preencha no `
 Registrar o aplicativo exige um diretório do Entra ID. Uma conta Microsoft pessoal não registra aplicativo
 fora de um diretório. Quem não tem um diretório de organização consegue um com uma assinatura do Azure.
 
-## Passo 4: rodar
+## Passo 4 (opcional): ligar o Keycloak de teste
+
+A Universidade D já entra por um login único simulado, sem configurar nada. Este passo liga um Keycloak de
+verdade como login único da Universidade B, lendo as pessoas do mesmo OpenLDAP de teste.
+
+1. No `.env`:
+   ```
+   OIDC_EMISSOR=http://localhost:8089/realms/unib
+   OIDC_CLIENT_ID=iotedu-poc
+   ```
+   O `OIDC_SEGREDO` já foi gerado pelo `preparar.sh`.
+2. Depois do passo 5, suba o Keycloak: `docker compose --profile sso up -d keycloak`. Ele demora cerca de
+   um minuto para responder.
+
+Na página, a Universidade B passa a ter dois logins para a mesma pessoa: o formulário do LDAP e o botão do
+Keycloak. O console do Keycloak fica em `http://localhost:8089`, usuário `admin`, senha em
+`KEYCLOAK_ADMIN_SENHA`.
+
+## Passo 5: rodar
 
 ```sh
 docker compose up -d --build              # OpenLDAP de teste e backend
-docker compose run --rm testes            # 100 testes; não precisam do projeto Firebase
-docker compose run --rm testes-firebase   # 9 testes de ponta a ponta contra o Firebase
+docker compose --profile teste build      # as imagens dos testes; refaça depois de mudar o código
+docker compose run --rm testes            # 160 testes; não precisam do projeto Firebase
+docker compose run --rm testes-firebase   # 10 testes de ponta a ponta contra o Firebase
 docker compose run --rm navegador         # a página num Chromium sem tela
 ```
 
-Depois abra `http://localhost:8088`. A página tem os quatro logins e mostra, depois de entrar, os claims
+Depois abra `http://localhost:8088`. A página tem os cinco logins e mostra, depois de entrar, os claims
 do token e o que o backend respondeu.
 
 | Para testar | Use |
 |---|---|
 | LDAP | Universidade B, usuário `ana`, `bruno` ou `carla`. A senha está em `LDAP_SENHA_PESSOAS`, no `.env`. |
 | CAFe | Universidade A. O botão abre uma universidade simulada; é só clicar em Entrar. |
+| Login único | Universidade D. O botão abre um provedor simulado; é só clicar em Entrar. Com o passo 4, a Universidade B abre o Keycloak: usuário `ana`, mesma senha do LDAP. |
 | Google | Universidade A. Com Gmail pessoal você entra como pendente. Para entrar aprovado, use uma conta de Workspace e ponha o domínio dela em `GOOGLE_HD`, no `.env`. |
 | Microsoft | Universidade A, com uma conta do diretório informado em `MS_TENANT_ID`. |
 
@@ -159,11 +207,12 @@ Para desligar e apagar os dados locais: `docker compose down -v`.
 
 | Comando | O que roda | O que prova |
 |---|---|---|
-| `docker compose run --rm testes` | `tests/unit` e `tests/rotas` | O nosso código: a regra de entrada, a conferência dos tokens do Google e da Microsoft, as rotas, o LDAP (contra um OpenLDAP de verdade, com TLS), a ponte da CAFe. Aqui o Firebase é trocado por um substituto. |
+| `docker compose run --rm testes` | `tests/unit` e `tests/rotas` | O nosso código: a regra de entrada, a conferência dos tokens do Google e da Microsoft, as rotas, o LDAP (contra um OpenLDAP de verdade, com TLS), a ponte da CAFe, o login único (contra o provedor simulado). Aqui o Firebase é trocado por um substituto. |
 | `docker compose run --rm testes-firebase` | `tests/firebase_real` | O Firebase: o custom token é aceito, os claims vêm no token, token adulterado é recusado, sair invalida a renovação. |
 | `docker compose run --rm navegador` | `navegador/conferir.py` | A página, num navegador de verdade, com o SDK web falando com o Firebase. |
 
-Os testes contra o Firebase criam contas `ldap:...` e `cafe:...` no projeto e as apagam no fim.
+Os testes contra o Firebase criam contas `ldap:...`, `cafe:...` e `oidc:...` no projeto e as apagam no
+fim.
 
 Google e Microsoft não entram nos testes automáticos, porque as telas de login deles não aceitam navegador
 automatizado. O roteiro para conferir à mão está na seção 5 da análise.
@@ -177,16 +226,20 @@ automatizado. O roteiro para conferir à mão está na seção 5 da análise.
 | `backend/poc/firebase.py` | As chamadas ao Firebase: verificar token, criar conta, gravar claims, emitir custom token. |
 | `backend/poc/ldap_auth.py` | Busca e bind no LDAP da instituição, com TLS. |
 | `backend/poc/ponte_cafe.py` | Recebe o token do SP SAML e devolve os dados da pessoa. |
+| `backend/poc/oidc_auth.py` | Fala com o login único da instituição: descoberta, PKCE, troca do código e conferência do token. |
+| `backend/poc/demo_oidc.py` | O login único simulado. Só existe no ambiente de teste. |
+| `backend/poc/conferir_ldap.py` | Confere o cadastro LDAP de uma instituição, passo a passo. |
 | `backend/poc/sessao.py` | Descobre quem faz o pedido, pelo cookie ou pelo token no cabeçalho. |
 | `backend/poc/limite.py` | Limite de tentativas de senha, com espera crescente. |
 | `backend/poc/repositorio.py` | Banco local (SQLite): pessoas e os logins de cada uma. |
 | `backend/poc/config.py` | Lê o `.env` e o `instituicoes.yaml`, e recusa configuração insegura. |
 | `backend/poc/app.py` | As rotas. |
-| `instituicoes.yaml` | Cadastro das instituições: domínios, logins ligados, diretório Microsoft, LDAP, escopo da CAFe. |
+| `instituicoes.yaml` | Cadastro das instituições: domínios, logins ligados, diretório Microsoft, LDAP, escopo da CAFe, login único. |
 | `pagina/` | A página de demonstração, sem etapa de build. |
 | `tests/` | Os testes. |
 | `navegador/` | A conferência da página num Chromium sem tela. |
 | `ldap/` | A imagem do OpenLDAP de teste, com três pessoas fictícias. |
+| `keycloak/` | O realm do Keycloak de teste (passo 4). |
 | `projecao.py` | Gera as tabelas de usuários ativos, cota e custo da análise. |
 | `credenciais/` | A chave de serviço do projeto. Não entra no git. |
 
@@ -199,6 +252,9 @@ automatizado. O roteiro para conferir à mão está na seção 5 da análise.
 | `GET /api/auth/cafe/login` | Começa o login pela CAFe, numa janela. |
 | `GET /api/auth/cafe/finish` | Recebe o token do SP SAML. |
 | `POST /api/auth/cafe/token` | Troca o código de uso único pelo custom token. |
+| `GET /api/auth/oidc/login?inst=...` | Começa o login único da instituição, numa janela. |
+| `GET /api/auth/oidc/callback` | Recebe o código do provedor, troca pelo token dele e confere. |
+| `POST /api/auth/oidc/token` | Troca o código de uso único pelo custom token. |
 | `POST /api/auth/logout` | Encerra a sessão e invalida a renovação no Firebase. |
 | `GET /api/me` | Quem está logado. Aceita o cookie ou `Authorization: Bearer <token do Firebase>`. |
 | `GET /api/painel` | Exemplo de rota que exige entrada aprovada. |
@@ -213,10 +269,64 @@ automatizado. O roteiro para conferir à mão está na seção 5 da análise.
 - **O backend recusa configuração insegura.** Ele não sobe sem projeto e sem chave, com o emulador do
   Firebase configurado, ou com segredo curto ou padrão. A mensagem de erro diz o que falta:
   `docker compose logs backend`.
-- **`AMBIENTE_DE_TESTE=1`**, que o `docker-compose.yml` liga, cria a universidade simulada e a rota de
-  limpeza dos testes (`/demo/...`). Elas só são aceitas com a página em `localhost` e não podem existir
-  numa instalação de verdade.
-- **A senha do LDAP passa pelo backend.** Ela não é registrada nem guardada, e só trafega por TLS.
+- **`AMBIENTE_DE_TESTE=1`**, que o `docker-compose.yml` liga, cria a universidade simulada, o login único
+  simulado e a rota de limpeza dos testes (`/demo/...`). Elas só são aceitas com a página em `localhost`
+  e não podem existir numa instalação de verdade. Fora dele, o provedor do login único tem de ser `https`.
+- **A senha do LDAP passa pelo backend.** Ela não é registrada nem guardada, e só trafega por TLS. No
+  login único ela não passa: a pessoa a digita na tela da instituição.
+
+## Ligar uma instituição de verdade
+
+O cadastro fica no `instituicoes.yaml`. O que pedir a cada instituição:
+
+**LDAP (OpenLDAP ou Active Directory).** O endereço `ldaps://`, a base onde ficam as pessoas, uma conta de
+serviço só de leitura e o certificado da CA que assinou o certificado do servidor. O backend precisa
+alcançar a porta 636 do diretório.
+
+```yaml
+  ufx:
+    nome: Universidade X
+    dominios: [ufx.edu.br]
+    metodos: [ldap]
+    ldap:
+      tipo: openldap            # ou ad
+      url: ldaps://ldap.ufx.edu.br:636
+      base: ou=people,dc=ufx,dc=edu,dc=br
+      bind_dn: cn=iotedu,ou=services,dc=ufx,dc=edu,dc=br
+      senha_env: LDAP_UFX_SENHA  # a senha da conta de serviço vem do ambiente, nunca do arquivo
+      ca: /certs/ufx-ca.crt
+```
+
+Com `tipo: ad` o filtro passa a procurar por `sAMAccountName` e ignora conta desativada. Se o diretório
+foge do padrão, `filtro`, `attr_uid`, `attr_mail` e `attr_nome` podem ser escritos no cadastro.
+
+Antes de abrir o login para as pessoas, confira o cadastro. O comando diz em qual passo parou: conexão e
+certificado, conta de serviço, base, filtro, atributos e, por fim, o login de uma pessoa.
+
+```sh
+docker compose exec backend python -m poc.conferir_ldap unib        # até a leitura da base
+docker compose exec backend python -m poc.conferir_ldap unib ana    # pede a senha e testa o login
+```
+
+**Login único (OIDC).** A instituição registra o IoTEdu como cliente no provedor dela, com o fluxo de
+código de autorização e o endereço de retorno `https://<painel>/api/auth/oidc/callback`, e informa o
+emissor, o identificador do cliente e o segredo.
+
+```yaml
+    metodos: [oidc]
+    oidc:
+      rotulo: Login único da UFX
+      emissor: https://sso.ufx.edu.br/realms/ufx
+      client_id: iotedu
+      segredo_env: OIDC_UFX_SEGREDO
+```
+
+Quem tem conta no provedor entra aprovado naquela instituição. O e-mail só liga o login a uma pessoa que
+já existe quando o provedor diz que o verificou e ele é de um domínio da instituição.
+
+**CAFe.** O SP SAML é o que o IoTEdu já tem; ele precisa estar cadastrado na federação. Aqui entram o
+endereço dele em `CAFE_SP_LOGIN_URL`, o mesmo segredo de ponte nos dois lados (`CAFE_PONTE_SEGREDO`) e o
+escopo da instituição em `cafe_escopos`.
 
 ## Se algo der errado
 
@@ -228,11 +338,12 @@ automatizado. O roteiro para conferir à mão está na seção 5 da análise.
 | "Token do provedor inválido" | O ID do cliente no `.env` não é o do provedor ligado no Firebase. |
 | Entrou, mas como pendente | A conta não prova instituição: confira `GOOGLE_HD` ou `MS_TENANT_ID` no `.env`. |
 | "Muitas tentativas. Aguarde." | O limite de senha errada no LDAP. Espere o tempo indicado. |
+| "O login da instituição não foi concluído." | O provedor está fora do ar, o segredo do cliente não confere ou o endereço de retorno não está cadastrado nele. Veja `docker compose logs backend`. |
 
 ## O que esta prova não é
 
 - Não é o código de produção. É a prova de que o desenho funciona, com a regra de entrada escrita e
   testada. Como encaixar no sistema está na seção 8 da análise.
-- O OpenLDAP e a universidade simulada da CAFe são de teste.
+- O OpenLDAP, o Keycloak, a universidade simulada da CAFe e o login único simulado são de teste.
 - As instituições do `instituicoes.yaml` são fictícias (domínios `.test`). Os identificadores reais de quem
   testa entram pelo `.env`.
