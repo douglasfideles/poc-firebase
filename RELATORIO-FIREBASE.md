@@ -23,12 +23,6 @@ Os números do Firebase vêm da documentação oficial, consultada em 25/11/2026
 | Conta por instituição | No modelo atual, um projeto por instalação. No núcleo em nuvem, um projeto global com a instituição dentro do token. O que decide é onde a chave do projeto fica. |
 | Provedores | Cinco caminhos de login implementados na prova de conceito: Google, Microsoft, LDAP, CAFe e o login único próprio de uma instituição. LDAP, CAFe e login único rodaram de ponta a ponta contra um projeto Firebase de verdade. A Microsoft entrou aprovada com uma conta real. No Google, só o caminho "pendente" foi visto com conta real. Faltam os testes com contas e sistemas de instituições. |
 
-Um achado muda a premissa da reunião: **o Firebase ainda não é usado pelo IoTEdu.** No código que roda nas
-duas instalações (`iotedu-stack`, conferido no commit de 26/10) não há SDK nem configuração do Firebase: o
-backend chama o Google direto, com um cliente OAuth criado no console do Google Cloud. Não foi conferido se
-existe um projeto Firebase criado no console; se existir, o sistema não o usa. Adotar o Firebase é trabalho
-novo.
-
 ## 1. Limites do plano gratuito
 
 Existem dois produtos com o mesmo nome: o Firebase Authentication e o Identity Platform, que é o upgrade

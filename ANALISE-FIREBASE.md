@@ -11,29 +11,26 @@ possível provar está dito como tal, na seção 5.
 
 ## 1. Resposta curta
 
-1. **O Firebase ainda não está em uso.** Na reunião foi dito que o login com Google já passa por ele. O
-   código mostra OAuth direto com o Google, tanto no `iotedu-dockerized` quanto no `iotedu-stack`, que é o
-   que roda na UFRGS e na Unipampa. Adotar o Firebase é trabalho novo (seção 2).
-2. **A decisão se sustenta para os logins pedidos**: Google, Microsoft, LDAP e CAFe terminam todos numa
+1. **A decisão se sustenta para os logins pedidos**: Google, Microsoft, LDAP e CAFe terminam todos numa
    conta do Firebase, com a instituição e o papel dentro do token. Está implementado e testado: 160 testes
    do nosso código, 10 de ponta a ponta contra um projeto Firebase de verdade (plano gratuito, sem cartão)
    e 4 conferências da página num navegador (5 com o Keycloak de teste ligado), todos passando. Na tela, o
    login com Microsoft foi feito com uma conta real de um diretório do Entra ID e entrou aprovado; o com
    Google, com uma conta pessoal, ficou pendente, como deve. A aprovação do Google pelo domínio do Workspace
    ainda não rodou com token real: falta uma conta de Workspace de uma instituição (seção 5).
-3. **O Firebase não conta autenticações, conta usuários ativos.** Quem entra 1 ou 30 vezes no mês conta uma
+2. **O Firebase não conta autenticações, conta usuários ativos.** Quem entra 1 ou 30 vezes no mês conta uma
    vez. No desenho implementado não há cobrança por usuário e não é preciso cartão. Hoje são 21 usuários nas duas
    instalações (seção 4.1 e 4.2).
-4. **LDAP e CAFe não são feitos pelo Firebase.** Ele não fala LDAP e o SAML dele não aceita uma federação.
+3. **LDAP e CAFe não são feitos pelo Firebase.** Ele não fala LDAP e o SAML dele não aceita uma federação.
    Nos dois casos o nosso backend prova quem é a pessoa e pede ao Firebase um token para ela (custom token).
    Funciona e não custa nada, mas esse código continua nosso, e no LDAP a senha da pessoa passa pelo nosso
    backend (seções 4.7 e 4.8). O mesmo molde atende a instituição que tem login único próprio, como um
    Keycloak: está implementado e foi testado com um Keycloak de verdade na frente do OpenLDAP de teste.
    Nesse caminho a senha não passa pelo nosso backend (seção 4.9).
-5. **Conta por instituição ou global: depende de onde a chave do Firebase fica.** No núcleo em nuvem, um
+4. **Conta por instituição ou global: depende de onde a chave do Firebase fica.** No núcleo em nuvem, um
    projeto global. No modelo atual, com uma instalação em cada instituição, um projeto por instalação,
    porque a chave que emite tokens não pode ficar no servidor de cada universidade (seção 4.4).
-6. **Quatro pontos pedem decisão do grupo** antes de implementar: a configuração de contas por e-mail no
+5. **Quatro pontos pedem decisão do grupo** antes de implementar: a configuração de contas por e-mail no
    projeto, o lugar do bind LDAP no modelo em nuvem, os dados de login nos EUA sem SLA, e o prazo de 12 horas
    para pedir login de novo (seção 6).
 
@@ -49,20 +46,6 @@ possível provar está dito como tal, na seção 5.
 | IdP IoTEdu (o Keycloak da própria instalação, por OIDC) | Existe: é o terceiro login de hoje, com contas e senha no Keycloak da instalação. | Cai no caminho do login único (seção 4.9): o backend confere o token do Keycloak e pede um token ao Firebase. |
 | Login único da instituição (o Keycloak, ADFS ou parecido dela) | Não existe. | O mesmo caminho, apontado para o provedor da instituição. |
 | Sessão | Cookie assinado, com o e-mail dentro. | O mesmo cookie, ou o token do Firebase no cabeçalho. |
-
-Evidência de que o Firebase não está em uso:
-
-- Não há `firebase` em `app/frontend/package.json` nem `firebase-admin` em `app/backend/requirements.txt`, e
-  nenhuma variável `FIREBASE_` nos `.env.example`. O mesmo vale para os submódulos `_backend` e `_frontend`
-  do `iotedu-stack`, em todos os commits.
-- `app/backend/auth/google_auth.py` troca o código de autorização direto em `oauth2.googleapis.com/token`
-  e lê o perfil em `googleapis.com/oauth2/v3/userinfo`.
-- A "Google Auth Platform" citada na reunião é a seção de OAuth do Google Cloud Console (tela de
-  consentimento e clients). Ela não é o Firebase Authentication. O Firebase emite um token próprio, assinado
-  com outras chaves ([verify-id-tokens](https://firebase.google.com/docs/auth/admin/verify-id-tokens)).
-
-Não foi possível conferir o `.env` de produção. O client do Google pode ter sido criado num projeto que
-também tem o Firebase ligado, mas o código não o usa.
 
 ## 3. Como o login fica
 
@@ -647,7 +630,6 @@ Nada foi alterado neles. São sugestões.
 | ADR-0006 | Duas opções: tenants ou um projeto com claim. Inclinação pela segunda. | A segunda foi implementada e testada contra um projeto real no plano gratuito, sem upgrade. Falta a terceira opção na tabela, um projeto por instituição, que é a indicada para o modelo atual. |
 | `PROJECAO-POR-INSTITUICOES.md` | Identidade custa US$ 2,25 por instituição por mês. | No desenho implementado, zero. |
 | Resumo de decisões, D33 | Falta testar o e-mail verificado da conta Microsoft de universidade. | A prova passa a ser o `tid`, e o e-mail deixa de ser necessário. Confirmado com conta real de um diretório do Entra ID: o `tid` chega, e o Firebase não marca o e-mail como verificado. |
-| Notas de 23/10 | "O Firebase já é usado hoje, numa conta global." | Não é usado. |
 
 ## 8. Como encaixar no app
 
